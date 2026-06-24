@@ -1,0 +1,59 @@
+# ─── Build / packaging artifacts ───────────────────────
+build/
+dist/
+packaging/deps/
+packaging/output/
+*.spec
+!packaging/osl_rag.spec
+
+# ─── Python ───────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+ENV/
+
+# ─── IDE / editor ────────────────────────────────────
+.codegraph/
+.idea/
+.vscode/
+*.swp
+
+# ─── Runtime caches and indexes ─────────────────────
+file_list_cache.json
+processed_files.txt
+processed_files_turbovec.txt
+embed_log.txt
+ingest_status_log.txt
+crash_log.txt
+chroma_db_ko/
+turbovec_index/
+faiss_index/
+
+# ─── Logs ────────────────────────────────────────────
+logs/
+
+# ─── Secrets / credentials ──────────────────────────
+githubPAT.txt
+*.pat
+*.token
+.env
+.env.*
+
+# ─── Personal / debugging files ─────────────────────
+KakaoTalk_*.jpg
+KakaoTalk_*.jpeg
+dummy.txt
+debug_es_index.py
+breaking_changes.html
+gemini_3.5_flash.html
+breaking_changes_*.html
+gemini_*.html
+
+# ─── OS junk ─────────────────────────────────────────
+Thumbs.db
+.DS_Store
+desktop.ini
