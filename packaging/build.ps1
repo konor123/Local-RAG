@@ -4,11 +4,10 @@ OSL RAG Internal build automation.
 Phases:
   1. Clean previous build artifacts.
   2. Build the PyInstaller single-folder distribution.
-  3. Stage Ollama binary and the three required Ollama models.
-  4. Stage the primary HuggingFace embedding model.
-  5. Stage the LibreOffice MSI (download if missing).
-  6. Compile the Inno Setup installer.
-  7. Print the final installer path.
+  3. Stage Ollama binary.
+  4. Stage the LibreOffice MSI (download if missing).
+  5. Compile the Inno Setup installer.
+  6. Print the final installer path.
 
 Run from the project root:
 
@@ -55,8 +54,6 @@ foreach ($p in @($Dist, $Build, $Deps)) {
 }
 New-Item -ItemType Directory -Path $Deps -Force | Out-Null
 New-Item -ItemType Directory -Path (Join-Path $Deps "ollama")     -Force | Out-Null
-New-Item -ItemType Directory -Path (Join-Path $Deps "ollama_models") | Out-Null
-New-Item -ItemType Directory -Path (Join-Path $Deps "hf_models")    -Force | Out-Null
 
 # ── 2. PyInstaller ────────────────────────────────────────────
 Step "Building PyInstaller single-folder distribution"
@@ -66,68 +63,24 @@ if (-not (Test-Path $spec)) { Fail "missing $spec" }
 $venvPy = "py"
 & $venvPy -3.12 -m PyInstaller $spec
 if ($LASTEXITCODE -ne 0) { Fail "PyInstaller failed" }
-$builtExe = Join-Path $Dist "native_ui" "native_ui.exe"
-if (-not (Test-Path $builtExe)) { Fail "PyInstaller output missing: $builtExe" }
-Ok "built $builtExe"
+$builtExe = Join-Path (Join-Path $Dist "native_ui") "native_ui.exe"
+if (-not (Test-Path $builtExe)) { Fail ("PyInstaller output missing: {0}" -f $builtExe) }
+Ok ("built {0}" -f $builtExe)
 
-# ── 3. stage Ollama + models ─────────────────────────────────
-Step "Staging Ollama binary and required models"
+# ── 3. stage Ollama binary ───────────────────────────────────
+Step "Staging Ollama binary"
 $ollamaSrc = Join-Path $env:LOCALAPPDATA "Programs\Ollama\ollama.exe"
 if (-not (Test-Path $ollamaSrc)) {
     $ollamaSrc = Join-Path $env:ProgramFiles "Ollama\ollama.exe"
 }
 if (Test-Path $ollamaSrc) {
-    Copy-Item -LiteralPath $ollamaSrc -Destination (Join-Path $Deps "ollama" "ollama.exe") -Force
+    Copy-Item -LiteralPath $ollamaSrc -Destination (Join-Path (Join-Path $Deps "ollama") "ollama.exe") -Force
     Ok "copied ollama.exe"
 } else {
     Fail "Ollama not found. Install from https://ollama.com and re-run."
 }
 
-# Pull required models if not present
-$requiredModels = @("exaone3.5:2.4b", "qwen3.5:4b", "all-minilm")
-foreach ($m in $requiredModels) {
-    & ollama list | Out-Null
-    $present = & ollama list 2>$null | Select-String ([regex]::Escape($m))
-    if (-not $present) {
-        Step "Pulling $m (first-time download, may take a while)"
-        & ollama pull $m
-        if ($LASTEXITCODE -ne 0) { Fail "ollama pull $m failed" }
-    } else {
-        Ok "$m already installed"
-    }
-}
-
-$ollamaModelRoot = Join-Path $env:USERPROFILE ".ollama\models"
-$dest = Join-Path $Deps "ollama_models"
-if (Test-Path $ollamaModelRoot) {
-    # Copy only the blobs and manifests (skip download cache)
-    foreach ($item in @("blobs", "manifests")) {
-        $src = Join-Path $ollamaModelRoot $item
-        if (Test-Path $src) {
-            Copy-Item -LiteralPath $src -Destination (Join-Path $dest $item) -Recurse -Force
-        }
-    }
-    Ok "copied Ollama model blobs/manifests"
-} else {
-    Fail "Ollama model dir missing: $ollamaModelRoot"
-}
-
-# ── 4. stage HuggingFace model ──────────────────────────────
-Step "Staging HuggingFace embedding model"
-$hfRoot = Join-Path $env:USERPROFILE ".cache\huggingface\hub"
-$hfModelDirs = @("models--dragonkue--multilingual-e5-small-ko")
-$hfDest = Join-Path $Deps "hf_models"
-foreach ($dir in $hfModelDirs) {
-    $src = Join-Path $hfRoot $dir
-    if (Test-Path $src) {
-        Copy-Item -LiteralPath $src -Destination (Join-Path $hfDest $dir) -Recurse -Force
-        Ok "copied $dir"
-    } else {
-        Fail "HuggingFace model missing: $src"
-    }
-}
-
-# ── 5. stage LibreOffice MSI ─────────────────────────────────
+# ── 4. stage LibreOffice MSI ─────────────────────────────────
 Step "Staging LibreOffice installer"
 $loMsi = Join-Path $Deps "LibreOffice.msi"
 $existing = @(
@@ -136,17 +89,20 @@ $existing = @(
 ) | Get-ChildItem -ErrorAction SilentlyContinue | Select-Object -First 1
 if ($existing) {
     Copy-Item -LiteralPath $existing.FullName -Destination $loMsi -Force
-    Ok "copied $($existing.FullName)"
+    Ok ("copied {0}" -f $existing.FullName)
 } elseif (Test-Path $loMsi) {
     Ok "LibreOffice MSI already staged"
 } else {
     $loUrl = "https://download.documentfoundation.org/libreoffice/stable/26.2.4/win/x86_64/LibreOffice_26.2.4_Win_x86-64.msi"
-    Write-Host "    LibreOffice MSI not found locally. Download from $loUrl" -ForegroundColor Yellow
-    Write-Host "    Re-run this script once LibreOffice.msi is placed at $loMsi" -ForegroundColor Yellow
-    Fail "LibreOffice MSI missing"
+    Write-Host "    LibreOffice MSI not found locally. Downloading from $loUrl" -ForegroundColor Yellow
+    # Force TLS 1.2 for Windows PowerShell 5.1 compatibility
+    [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+    Invoke-WebRequest -Uri $loUrl -OutFile $loMsi
+    if (-not (Test-Path $loMsi)) { Fail "LibreOffice MSI download failed" }
+    Ok "downloaded LibreOffice MSI"
 }
 
-# ── 6. Inno Setup ────────────────────────────────────────────
+# ── 5. Inno Setup ────────────────────────────────────────────
 if ($SkipInnoSetup) {
     Step "Skipping Inno Setup (--SkipInnoSetup)"
 } else {
@@ -157,6 +113,10 @@ if ($SkipInnoSetup) {
         if (Test-Path $candidate) { $iscc = Get-Item $candidate }
     }
     if (-not $iscc) {
+        $candidate = "C:\InnoSetupExtracted\ISCC.exe"
+        if (Test-Path $candidate) { $iscc = Get-Item $candidate }
+    }
+    if (-not $iscc) {
         Fail "iscc.exe not found. Install Inno Setup 6 and re-run."
     }
     $iss = Join-Path $Packaging "installer.iss"
@@ -164,11 +124,11 @@ if ($SkipInnoSetup) {
     if ($LASTEXITCODE -ne 0) { Fail "Inno Setup compilation failed" }
 }
 
-# ── 7. summary ────────────────────────────────────────────────
+# ── 6. summary ────────────────────────────────────────────────
 Step "Build complete"
 $output = Join-Path $Packaging "output"
 if (Test-Path $output) {
-    Get-ChildItem $output | ForEach-Object { Ok $_.FullName }
+    Get-ChildItem $output | ForEach-Object { Ok "$($_.FullName)" }
 } else {
     Write-Host "    Run packaging\installer.iss through Inno Setup GUI to produce the installer." -ForegroundColor Yellow
 }

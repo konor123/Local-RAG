@@ -1,7 +1,8 @@
 ; -*- Inno Setup Script -*-
 ; OSL RAG Internal Inno Setup installer script.
-; Bundles the PyInstaller-built native_ui, Ollama + models, HuggingFace
-; embedding model, and LibreOffice installer. Run `packaging\build.ps1`
+; Bundles the PyInstaller-built native_ui, Ollama binary, and LibreOffice
+; installer. Required Ollama models are downloaded during setup.
+; Run `packaging\build.ps1`
 ; to produce a packed `deps/` directory, then compile with Inno Setup.
 
 #define MyAppName "OSL RAG Internal"
@@ -28,11 +29,8 @@ PrivilegesRequired=admin
 PrivilegesRequiredOverridesAllowed=dialog
 OutputDir=output
 OutputBaseFilename=OSL_RAG_Internal_Setup
-Compression=lzma2
-SolidCompression=no
-DiskSpanning=yes
-DiskSliceSize=700000000
-SlicesPerDisk=1
+Compression=lzma2/ultra64
+SolidCompression=yes
 WizardStyle=modern
 UninstallDisplayIcon={app}\{#MyAppExeName}
 ; SetupIconFile=icon.ico
@@ -46,7 +44,7 @@ Name: "korean"; MessagesFile: "compiler:Languages\Korean.isl"
 
 [Tasks]
 Name: "desktopicon"; Description: "데스크톱에 바로가기 만들기"; GroupDescription: "추가 작업:"
-Name: "startup";     Description: "Windows 시작 시 자동 실행";      GroupDescription: "추가 작업:"
+Name: "startup";     Description: "Windows 시작 시 자동 실행";      GroupDescription: "추가 작업:"; Flags: checkedonce
 
 [Files]
 ; PyInstaller single-folder distribution
@@ -54,12 +52,6 @@ Source: "..\dist\native_ui\*"; DestDir: "{app}"; Flags: recursesubdirs ignorever
 
 ; Ollama binary
 Source: "deps\ollama\{#MyOllamaExeName}"; DestDir: "{app}\ollama"; Flags: ignoreversion
-
-; Ollama models (exaone3.5:2.4b + qwen3.5:4b + all-minilm)
-Source: "deps\ollama_models\*"; DestDir: "{userpf}\.ollama\models"; Flags: recursesubdirs ignoreversion
-
-; HuggingFace embedding model
-Source: "deps\hf_models\*"; DestDir: "{userpf}\.cache\huggingface\hub"; Flags: recursesubdirs ignoreversion
 
 ; LibreOffice installer (run silently post-install)
 Source: "deps\{#MyLibreOfficeMsi}"; DestDir: "{tmp}"; Flags: ignoreversion deleteafterinstall
@@ -89,11 +81,7 @@ Name: "{commondesktop}\{#MyAppNameShort}"; Filename: "{app}\{#MyAppExeName}"; Ta
 Filename: "{sys}\msiexec.exe"; Parameters: "/i ""{tmp}\{#MyLibreOfficeMsi}"" /passive /norestart"; \
     Flags: waituntilterminated; Check: ShouldInstallLibreOffice
 
-; 2) Pre-create the Ollama directory so the first run is fast
-Filename: "{cmd}"; Parameters: "/C if not exist ""{userpf}\.ollama"" mkdir ""{userpf}\.ollama"""; \
-    Flags: runhidden
-
-; 3) Launch the app
+; 2) Launch the app
 Filename: "{app}\{#MyAppExeName}"; Description: "OSL RAG Internal 실행"; Flags: nowait postinstall skipifsilent
 
 [UninstallDelete]
@@ -110,6 +98,126 @@ Type: filesandordirs; Name: "{app}\chat_memory.json"
 Type: filesandordirs; Name: "{userstartup}\{#MyAppNameShort}.bat"
 
 [Code]
+var
+  FatalPostInstallFailure: Boolean;
+
+procedure FailPostInstall(MessageText: String);
+begin
+  FatalPostInstallFailure := True;
+  MsgBox(
+    MessageText + #13#10#13#10 +
+    '설치를 종료합니다. 네트워크 연결을 확인한 뒤 설치 파일을 다시 실행하세요.',
+    mbCriticalError,
+    MB_OK);
+  WizardForm.Close;
+end;
+
+procedure CancelButtonClick(CurPageID: Integer; var Cancel, Confirm: Boolean);
+begin
+  if FatalPostInstallFailure then
+  begin
+    Confirm := False;
+    Cancel := True;
+  end;
+end;
+
+function GetCustomSetupExitCode: Integer;
+begin
+  if FatalPostInstallFailure then
+    Result := 1
+  else
+    Result := 0;
+end;
+
+function UrlReachable(Url: String): Boolean;
+var
+  Http: Variant;
+begin
+  Result := False;
+  try
+    Http := CreateOleObject('WinHttp.WinHttpRequest.5.1');
+    Http.SetTimeouts(3000, 3000, 3000, 3000);
+    Http.Open('GET', Url, False);
+    Http.Send('');
+    Result := (Http.Status >= 200) and (Http.Status < 500);
+  except
+    Result := False;
+  end;
+end;
+
+function PrepareToInstall(var NeedsRestart: Boolean): String;
+begin
+  Result := '';
+  if not UrlReachable('https://registry.ollama.ai/v2/') then
+    Result := 'Ollama 모델 다운로드를 위해 인터넷 연결이 필요합니다. 네트워크 연결을 확인한 뒤 설치를 다시 실행하세요.';
+end;
+
+function WaitForOllamaServer(): Boolean;
+var
+  I: Integer;
+begin
+  Result := False;
+  for I := 1 to 30 do
+  begin
+    if UrlReachable('http://127.0.0.1:11434/api/tags') then
+    begin
+      Result := True;
+      Exit;
+    end;
+    Sleep(1000);
+  end;
+end;
+
+function RunOllamaModelPull(ModelName: String; DisplayName: String): Boolean;
+var
+  ResultCode: Integer;
+  Ok: Boolean;
+begin
+  Result := False;
+  WizardForm.StatusLabel.Caption := DisplayName + ' 다운로드 중... 시간이 걸릴 수 있습니다.';
+  WizardForm.Refresh;
+  Ok := ExecAsOriginalUser(
+    ExpandConstant('{app}\ollama\{#MyOllamaExeName}'),
+    'pull ' + ModelName,
+    ExpandConstant('{app}\ollama'),
+    SW_HIDE,
+    ewWaitUntilTerminated,
+    ResultCode);
+  if (not Ok) or (ResultCode <> 0) then
+  begin
+    FailPostInstall(DisplayName + ' 다운로드에 실패했습니다.');
+    Exit;
+  end;
+  Result := True;
+end;
+
+function InstallRequiredOllamaModels(): Boolean;
+var
+  ResultCode: Integer;
+begin
+  Result := False;
+  WizardForm.StatusLabel.Caption := 'Ollama 서버 시작 중...';
+  WizardForm.Refresh;
+  ExecAsOriginalUser(
+    ExpandConstant('{app}\ollama\{#MyOllamaExeName}'),
+    'serve',
+    ExpandConstant('{app}\ollama'),
+    SW_HIDE,
+    ewNoWait,
+    ResultCode);
+
+  if not WaitForOllamaServer() then
+  begin
+    FailPostInstall('Ollama 서버를 시작하지 못했습니다.');
+    Exit;
+  end;
+
+  if not RunOllamaModelPull('exaone3.5:2.4b', 'EXAONE 기본 모델') then Exit;
+  if not RunOllamaModelPull('qwen3.5:4b', 'Qwen 어드바이저 모델') then Exit;
+  if not RunOllamaModelPull('all-minilm', 'Ollama 임베딩 모델') then Exit;
+  Result := True;
+end;
+
 // Custom check used by the [Run] section above.
 function ShouldInstallLibreOffice(): Boolean;
 begin
@@ -121,26 +229,23 @@ begin
             not RegKeyExists(HKLM, 'SOFTWARE\WOW6432Node\LibreOffice\LibreOffice');
 end;
 
-procedure InitializeWizard();
-begin
-  // Default: enable "Windows 시작 시 자동 실행" task.
-  WizardForm.TasksList.Checked[1] := True;
-end;
-
 procedure CurStepChanged(CurStep: TSetupStep);
 var
   BatPath, BatContent: String;
 begin
   if CurStep = ssPostInstall then
   begin
-    if IsTaskSelected('startup') then
+    if not InstallRequiredOllamaModels() then
+      Exit;
+
+    if WizardIsTaskSelected('startup') then
     begin
       // Use a .bat launcher (matches native_ui.py _enable_startup).
       BatPath := ExpandConstant('{userstartup}\{#MyAppNameShort}.bat');
       BatContent :=
         '@echo off' + #13#10 +
         'start "" "' + ExpandConstant('{app}\{#MyAppExeName}') + '"' + #13#10;
-      if not SaveStringToFile(BatContent, BatPath, False) then
+      if not SaveStringToFile(BatPath, BatContent, False) then
         MsgBox('시작 프로그램 바로가기를 만들지 못했습니다.', mbError, MB_OK);
     end;
   end;

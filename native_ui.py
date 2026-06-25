@@ -13,10 +13,12 @@ import platform
 import shutil
 import subprocess
 import sys
+import time
 import traceback
 from pathlib import Path
 from typing import Dict, List, Optional
 
+import requests
 from PySide6.QtCore import QObject, QThread, QTimer, Qt, Signal
 from PySide6.QtGui import QAction, QCloseEvent, QColor, QIcon, QPainter, QPixmap
 from PySide6.QtWidgets import (
@@ -40,6 +42,71 @@ from unified_engine import get_unified_response
 
 APP_TITLE = "OSL RAG Internal"
 FILE_URL_PREFIX = "file-oslref:///"
+OLLAMA_URL = "http://127.0.0.1:11434"
+_ollama_process: Optional[subprocess.Popen] = None
+
+
+# ─── Ollama lifecycle ──────────────────────────────────
+def _ollama_ready(timeout: float = 1.5) -> bool:
+    try:
+        response = requests.get(f"{OLLAMA_URL}/api/tags", timeout=timeout)
+        return response.status_code == 200
+    except Exception:
+        return False
+
+
+def _find_ollama_executable() -> Optional[str]:
+    candidates: List[Path] = []
+    if hasattr(sys, "_MEIPASS"):
+        candidates.append(Path(getattr(sys, "_MEIPASS")) / "ollama" / "ollama.exe")
+    if getattr(sys, "frozen", False):
+        candidates.append(Path(sys.executable).resolve().parent / "ollama" / "ollama.exe")
+    candidates.append(Path(__file__).resolve().parent / "ollama" / "ollama.exe")
+    for candidate in candidates:
+        if candidate.exists():
+            return str(candidate)
+    return shutil.which("ollama")
+
+
+def _ensure_ollama_running() -> bool:
+    """Start bundled Ollama only when no local server is already available."""
+    global _ollama_process
+    if _ollama_ready():
+        return True
+    exe = _find_ollama_executable()
+    if not exe:
+        raise RuntimeError("Ollama 실행 파일을 찾을 수 없습니다.")
+
+    creationflags = 0
+    startupinfo = None
+    if os.name == "nt":
+        creationflags = (
+            subprocess.CREATE_NO_WINDOW
+            | subprocess.DETACHED_PROCESS
+            | subprocess.CREATE_NEW_PROCESS_GROUP
+        )
+        startupinfo = subprocess.STARTUPINFO()
+        startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+
+    _ollama_process = subprocess.Popen(
+        [exe, "serve"],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        creationflags=creationflags,
+        startupinfo=startupinfo,
+        close_fds=True,
+    )
+    deadline = time.time() + 30
+    while time.time() < deadline:
+        if _ollama_ready(timeout=1.0):
+            return True
+        if _ollama_process.poll() is not None:
+            if _ollama_ready(timeout=1.0):
+                return True
+            break
+        time.sleep(0.75)
+    raise RuntimeError("Ollama 서버가 시작되지 않았습니다. 포트 11434를 확인하세요.")
 
 
 # ─── Tray icon ──────────────────────────────────────────
@@ -318,6 +385,8 @@ class PreloadWorker(QThread):
         ok = True
         messages: List[str] = []
         try:
+            self.status.emit("Ollama 서버 상태 확인 중...")
+            _ensure_ollama_running()
             self.status.emit("EXAONE 기본 모델 상태 확인 중...")
             from ai_providers.local_qwen import LocalQwenProvider
 
