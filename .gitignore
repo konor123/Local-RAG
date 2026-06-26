@@ -2,7 +2,6 @@
 build/
 dist/
 packaging/deps/
-packaging/output/
 *.spec
 !packaging/osl_rag.spec
 

@@ -7,10 +7,11 @@ import os
 import json
 import shutil
 from typing import List
+from runtime_paths import runtime_path
 
-FILE_LIST_CACHE = "./file_list_cache.json"
-PROCESSED_FILES = "./processed_files.txt"
-VECTOR_STORE_PATH = "./chroma_db_ko"
+FILE_LIST_CACHE = runtime_path("file_list_cache.json")
+PROCESSED_FILES = runtime_path("processed_files.txt")
+VECTOR_STORE_PATH = runtime_path("chroma_db_ko")
 
 def clean_file_list_cache():
     """file_list_cache.json 정리"""

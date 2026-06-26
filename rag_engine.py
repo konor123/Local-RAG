@@ -13,9 +13,10 @@ from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.runnables import RunnablePassthrough
 from config_manager import get_local_ai_config
+from runtime_paths import runtime_path
 
 # Configuration
-VECTOR_STORE_PATH = "./chroma_db_ko"  # Korean-optimized embeddings
+VECTOR_STORE_PATH = os.environ.get("VECTOR_STORE_PATH", runtime_path("chroma_db_ko"))  # Korean-optimized embeddings
 EMBEDDING_MODEL = "dragonkue/multilingual-e5-small-ko"
 _LOCAL_AI_CONFIG = get_local_ai_config()
 LLM_MODEL = _LOCAL_AI_CONFIG["model"]

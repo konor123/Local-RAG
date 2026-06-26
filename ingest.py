@@ -17,6 +17,7 @@ if sys.platform == "win32" and hasattr(sys.stdout, "reconfigure"):
 import glob
 from typing import List, Dict, Any
 from drive_manager import filter_walk_dirs, get_exclude_dir_names, get_search_roots
+from runtime_paths import logs_dir, runtime_path
 from langchain_community.document_loaders import (
     PyPDFLoader,
     Docx2txtLoader,
@@ -379,7 +380,7 @@ def send_status_notification(message):
 
 # Configuration
 DRIVES = get_search_roots()
-VECTOR_STORE_PATH = "./chroma_db_ko"  # Korean-optimized embeddings
+VECTOR_STORE_PATH = os.environ.get("VECTOR_STORE_PATH", runtime_path("chroma_db_ko"))  # Korean-optimized embeddings
 EMBEDDING_MODEL = "all-minilm"
 OLLAMA_BASE_URL = "http://localhost:11434"
 TEST_LIMIT = int(os.environ.get("INDEX_SAMPLE_LIMIT", "0") or 0)  # 0 means full indexing
@@ -388,10 +389,10 @@ INDEX_SAMPLE_MODE = os.environ.get("INDEX_SAMPLE_MODE", "priority_first").lower(
 INDEX_SAMPLE_WRITE = os.environ.get("INDEX_SAMPLE_WRITE", "0" if TEST_LIMIT else "1").lower() in ("1", "true", "yes", "y")
 WORKER_FILE_TIMEOUT_SEC = int(os.environ.get("WORKER_FILE_TIMEOUT_SEC", "600") or 600)
 WORKER_START_TIMEOUT_SEC = int(os.environ.get("WORKER_START_TIMEOUT_SEC", "120") or 120)
-PROCESSED_FILES_PATH = os.environ.get("PROCESSED_FILES_PATH", "processed_files.txt")
+PROCESSED_FILES_PATH = os.environ.get("PROCESSED_FILES_PATH", runtime_path("processed_files.txt"))
 ACTIVITY_LOG_PATH = os.environ.get(
     "ACTIVITY_LOG_PATH",
-    "logs/activity_turbovec.log" if os.environ.get("VECTOR_BACKEND", "faiss").lower() == "turbovec" else "logs/activity.log",
+    runtime_path("logs", "activity_turbovec.log") if os.environ.get("VECTOR_BACKEND", "faiss").lower() == "turbovec" else runtime_path("logs", "activity.log"),
 )
 RESET_DB = False  # DO NOT RESET DB usually
 
@@ -561,7 +562,7 @@ last_save_time = time.time()
 
 def get_files_from_drives(drives: List[str]) -> List[str]:
     # Cache file to avoid repeated scanning
-    CACHE_FILE = "file_list_cache.json"
+    CACHE_FILE = runtime_path("file_list_cache.json")
     
     if os.path.exists(CACHE_FILE):
         try:
@@ -615,8 +616,6 @@ def get_files_from_drives(drives: List[str]) -> List[str]:
 def log_activity(status, file_path):
     """Logs start/end of file processing to tracking file for crash recovery"""
     try:
-        # Create logs dir if not exists (fail-safe)
-        if not os.path.exists("logs"): os.makedirs("logs", exist_ok=True)
         with open(ACTIVITY_LOG_PATH, "a", encoding="utf-8") as f:
             f.write(f"{status}|{file_path}\n")
     except:
@@ -653,7 +652,7 @@ def recover_from_crash():
 
     if in_flight:
         print(f"🚨 Found {len(in_flight)} files from crashed session. Marking as SKIPPED.")
-        with open("logs/skipped_crash.txt", "a", encoding="utf-8") as f:
+        with open(runtime_path("logs", "skipped_crash.txt"), "a", encoding="utf-8") as f:
             for path in in_flight:
                 f.write(f"{path}\n")
                 print(f"   [Skip] Crashed file: {os.path.basename(path)}")
@@ -726,7 +725,7 @@ def load_document(file_path: str) -> List[Document]:
                 if result.returncode == 0:
                     output = result.stdout.strip()
                     if output == "ENCRYPTED_FILE":
-                         with open("skipped_encrypted.txt", "a", encoding="utf-8") as log_file:
+                         with open(runtime_path("logs", "skipped_encrypted.txt"), "a", encoding="utf-8") as log_file:
                             log_file.write(f"{file_path}\n")
                          record_index_status(file_path, STATUS_ENCRYPTED, "worker reported encrypted file")
                          return []
@@ -885,13 +884,13 @@ class ExtendedChroma(Chroma):
                 # But if we don't raise, we lose data.
                 # Losing 100 chunks is better than crashing loop loop.
                 # Log detailed error
-                with open("logs/db_write_errors.log", "a") as f:
+                with open(runtime_path("logs", "db_write_errors.log"), "a", encoding="utf-8") as f:
                     f.write(f"Batch {i}: {e}\n")
 
 def ingest_data():
     print("Starting ingestion process (GPU Pipeline Mode: Reader -> Embedder -> Writer)...")
     session_started_at = time.time()
-    report_path = os.environ.get("INDEX_REPORT_PATH", "logs/index_sample_report.json" if TEST_LIMIT else "logs/index_status_report.json")
+    report_path = os.environ.get("INDEX_REPORT_PATH", runtime_path("logs", "index_sample_report.json") if TEST_LIMIT else runtime_path("logs", "index_status_report.json"))
     if TEST_LIMIT:
         print(f"[Sample] INDEX_SAMPLE_LIMIT={TEST_LIMIT}, mode={INDEX_SAMPLE_MODE}, write_enabled={INDEX_SAMPLE_WRITE}")
     
@@ -1121,8 +1120,7 @@ def ingest_data():
                 status = STATUS_TIMEOUT if isinstance(e, WorkerResponseTimeout) else STATUS_EMBEDDING
                 record_index_status(file_path, status, str(e))
                 
-                if not os.path.exists("logs"): os.makedirs("logs", exist_ok=True)
-                with open("logs/skipped_crash.txt", "a", encoding="utf-8") as f: f.write(f"{file_path}\n")
+                with open(runtime_path("logs", "skipped_crash.txt"), "a", encoding="utf-8") as f: f.write(f"{file_path}\n")
             
             finally:
                 if temp_input and os.path.exists(temp_input):
@@ -1242,7 +1240,7 @@ def ingest_data():
         print("   [Monitor] Started.")
         send_status_notification(f"🚀 인덱싱 시스템 재가동 (최적화 적용)\n전체 대상: {len(files)}개\n남은 작업: {len(new_files)}개")
         
-        LOG_FILE = "ingest_status_log.txt"
+        LOG_FILE = runtime_path("logs", "ingest_status_log.txt")
         with open(LOG_FILE, "a", encoding="utf-8") as f:
             f.write(f"\n--- Session Started: {time.ctime()} ---\n")
         
@@ -1419,7 +1417,7 @@ if __name__ == "__main__":
         print("\nProcess stopped by user.")
     except Exception as e:
         import traceback
-        with open("crash_log.txt", "w") as f:
+        with open(runtime_path("logs", "crash_log.txt"), "w", encoding="utf-8") as f:
             f.write(traceback.format_exc())
         print(f"\nCRITICAL ERROR: {e}")
         send_windows_notification("RAG Ingestion Error", f"Process crashed: {e}")

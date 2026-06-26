@@ -8,6 +8,7 @@ import subprocess
 from typing import List, Dict, Optional
 from pathlib import Path
 from drive_manager import filter_walk_dirs, get_exclude_dir_names, get_search_roots
+from runtime_paths import runtime_path
 
 # Search roots: connected local/network drives by default.
 DRIVES = get_search_roots()
@@ -20,7 +21,7 @@ _FILE_CACHE_INDEX = None  # Pre-processed index: [(filename, filepath), ...]
 _BIGRAM_INDEX = None      # Inverted index: {bigram: set(indices)}
 _EXT_INDEX = None         # Extension index: {".xlsx": set(indices)}
 _DRIVE_INDEX = None       # Drive index: {"X": set(indices)}
-_CACHE_FILE = "./file_list_cache.json"
+_CACHE_FILE = runtime_path("file_list_cache.json")
 _CACHE_MTIME = None
 
 
@@ -595,7 +596,7 @@ def list_directory(path: str, max_items: int = 100) -> Dict:
         return {"error": str(e)}
 
 
-def save_memory(key: str, value: str, memory_file: str = "./chat_memory.json") -> Dict:
+def save_memory(key: str, value: str, memory_file: str = None) -> Dict:
     """
     Save a piece of learned information to persistent memory.
     
@@ -609,6 +610,7 @@ def save_memory(key: str, value: str, memory_file: str = "./chat_memory.json") -
     """
     import json
     from datetime import datetime
+    memory_file = memory_file or runtime_path("chat_memory.json")
     
     try:
         # Load existing memory
@@ -634,7 +636,7 @@ def save_memory(key: str, value: str, memory_file: str = "./chat_memory.json") -
         return {"error": str(e)}
 
 
-def recall_memory(keyword: str = None, memory_file: str = "./chat_memory.json") -> Dict:
+def recall_memory(keyword: str = None, memory_file: str = None) -> Dict:
     """
     Recall learned information from memory.
     
@@ -646,6 +648,7 @@ def recall_memory(keyword: str = None, memory_file: str = "./chat_memory.json") 
         Dict with matching memories
     """
     import json
+    memory_file = memory_file or runtime_path("chat_memory.json")
     
     try:
         if not os.path.exists(memory_file):

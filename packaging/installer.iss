@@ -64,13 +64,15 @@ Source: "..\LICENSE";   DestDir: "{app}"; Flags: ignoreversion onlyifdoesntexist
 ; App data directories (created at install time, populated at first run)
 Name: "{userappdata}\{#MyAppNameShort}"
 Name: "{localappdata}\{#MyAppNameShort}"
+Name: "{localappdata}\{#MyAppNameShort}\logs"
+Name: "{localappdata}\{#MyAppNameShort}\faiss_index"
 Name: "{localappdata}\{#MyAppNameShort}\turbovec_index"
 
 [Icons]
 ; Start Menu
 Name: "{group}\{#MyAppNameShort}"; Filename: "{app}\{#MyAppExeName}"
 Name: "{group}\설정 폴더 열기"; Filename: "{userappdata}\{#MyAppNameShort}"
-Name: "{group}\로그 폴더 열기"; Filename: "{app}\logs"
+Name: "{group}\로그 폴더 열기"; Filename: "{localappdata}\{#MyAppNameShort}\logs"
 Name: "{group}\제거";          Filename: "{uninstallexe}"
 
 ; Desktop (optional)
@@ -88,7 +90,6 @@ Filename: "{app}\{#MyAppExeName}"; Description: "OSL RAG Internal 실행"; Flags
 ; Clean up runtime state created by the app
 Type: filesandordirs; Name: "{userappdata}\{#MyAppNameShort}"
 Type: filesandordirs; Name: "{localappdata}\{#MyAppNameShort}"
-Type: filesandordirs; Name: "{localappdata}\{#MyAppNameShort}\turbovec_index"
 Type: filesandordirs; Name: "{app}\logs"
 Type: filesandordirs; Name: "{app}\cache"
 Type: filesandordirs; Name: "{app}\*.cache"

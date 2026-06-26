@@ -15,6 +15,7 @@ from typing import Dict, List
 
 import faiss
 import numpy as np
+from runtime_paths import runtime_path
 
 
 VECTOR_DIM = int(os.environ.get("VECTOR_DIM", "384"))
@@ -22,8 +23,8 @@ VECTOR_BACKEND = os.environ.get("VECTOR_BACKEND", "faiss").strip().lower() or "f
 VECTOR_BACKEND_FALLBACK = os.environ.get("VECTOR_BACKEND_FALLBACK", "").strip().lower()
 VECTOR_BACKEND_STRICT = os.environ.get("VECTOR_BACKEND_STRICT", "true").strip().lower() in ("1", "true", "yes", "y")
 
-FAISS_INDEX_DIR = os.environ.get("FAISS_INDEX_DIR", "./faiss_index")
-TURBOVEC_INDEX_DIR = os.environ.get("TURBOVEC_INDEX_DIR", "./turbovec_index")
+FAISS_INDEX_DIR = os.environ.get("FAISS_INDEX_DIR", runtime_path("faiss_index"))
+TURBOVEC_INDEX_DIR = os.environ.get("TURBOVEC_INDEX_DIR", runtime_path("turbovec_index"))
 TURBOVEC_BIT_WIDTH = int(os.environ.get("TURBOVEC_BIT_WIDTH", "4") or 4)
 
 _backend_lock = threading.RLock()

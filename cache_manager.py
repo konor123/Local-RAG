@@ -10,10 +10,11 @@ import threading
 from typing import List, Set, Optional
 from datetime import datetime
 from drive_manager import filter_walk_dirs, get_exclude_dir_names, get_search_roots
+from runtime_paths import runtime_path
 
 # 검색 대상 드라이브: 기본은 현재 연결된 전체 드라이브
 DRIVES = get_search_roots()
-CACHE_FILE = "./file_list_cache.json"
+CACHE_FILE = runtime_path("file_list_cache.json")
 
 # 지원하는 파일 확장자
 SUPPORTED_EXTENSIONS = {

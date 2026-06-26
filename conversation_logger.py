@@ -7,6 +7,7 @@ import os
 import datetime
 import re
 from typing import Dict, Any
+from runtime_paths import logs_dir
 
 SENSITIVE_PATTERNS = [
     re.compile(r"AIza[0-9A-Za-z_\-]{20,}"),
@@ -27,7 +28,8 @@ def redact_sensitive(value):
     return value
 
 class ConversationLogger:
-    def __init__(self, log_dir="logs"):
+    def __init__(self, log_dir=None):
+        log_dir = log_dir or logs_dir()
         self.log_dir = log_dir
         if not os.path.exists(log_dir):
             os.makedirs(log_dir, exist_ok=True)

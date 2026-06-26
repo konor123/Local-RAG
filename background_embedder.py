@@ -13,15 +13,16 @@ import logging
 from typing import List, Set, Optional, Callable
 from datetime import datetime
 from collections import defaultdict, Counter
+from runtime_paths import runtime_path
 
 # 환경 변수 설정 (저자원 모드)
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 os.environ["OMP_NUM_THREADS"] = "2"  # 최소 스레드
 os.environ["ANONYMIZED_TELEMETRY"] = "False"
 
-PROCESSED_FILE = os.environ.get("PROCESSED_FILES_PATH", "./processed_files.txt")
-VECTOR_STORE_PATH = "./chroma_db_ko"
-LOG_FILE = "./embed_log.txt"
+PROCESSED_FILE = os.environ.get("PROCESSED_FILES_PATH", runtime_path("processed_files.txt"))
+VECTOR_STORE_PATH = os.environ.get("VECTOR_STORE_PATH", runtime_path("chroma_db_ko"))
+LOG_FILE = os.environ.get("EMBED_LOG_PATH", runtime_path("logs", "embed_log.txt"))
 
 # 임베딩 가능한 확장자
 EMBEDDABLE_EXTENSIONS = {
@@ -67,9 +68,12 @@ def _get_logger():
     logger = logging.getLogger("embedder")
     if not logger.handlers:
         logger.setLevel(logging.DEBUG)
-        fh = logging.FileHandler(LOG_FILE, encoding="utf-8")
-        fh.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s", datefmt="%Y-%m-%d %H:%M:%S"))
-        logger.addHandler(fh)
+        try:
+            fh = logging.FileHandler(LOG_FILE, encoding="utf-8")
+            fh.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s", datefmt="%Y-%m-%d %H:%M:%S"))
+            logger.addHandler(fh)
+        except Exception:
+            logger.addHandler(logging.NullHandler())
     return logger
 
 _log = _get_logger()

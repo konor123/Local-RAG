@@ -293,7 +293,8 @@ def _perform_jit_ingestion(file_results: List[Dict], events: List[Dict]):
     try:
         # 1. 처리된 목록 로드
         processed_files = set()
-        processed_files_path = os.environ.get("PROCESSED_FILES_PATH", "processed_files.txt")
+        from runtime_paths import runtime_path
+        processed_files_path = os.environ.get("PROCESSED_FILES_PATH", runtime_path("processed_files.txt"))
         if os.path.exists(processed_files_path):
             with open(processed_files_path, "r", encoding="utf-8", errors="ignore") as f:
                 processed_files = set(line.strip() for line in f)
