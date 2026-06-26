@@ -19,7 +19,7 @@ CACHE_FILE = runtime_path("file_list_cache.json")
 # 지원하는 파일 확장자
 SUPPORTED_EXTENSIONS = {
     ".pdf", ".docx", ".doc", ".xlsx", ".xls",
-    ".pptx", ".ppt", ".dwg", ".txt", ".html", ".htm"
+    ".pptx", ".ppt", ".dwg", ".hwp", ".hwpx", ".txt", ".html", ".htm"
 }
 
 

@@ -14,12 +14,37 @@ from langchain_community.document_loaders import (
 from langchain_core.documents import Document
 import pandas as pd
 
+class HwpLoader:
+    """Loader for HWP/HWPX files using hwpkit."""
+    def __init__(self, file_path: str):
+        self.file_path = file_path
+
+    def load(self):
+        try:
+            from hwpkit import extract_text_from_file
+
+            text = extract_text_from_file(self.file_path)
+            if isinstance(text, (list, tuple)):
+                text = "\n".join(str(item) for item in text if item)
+            text = str(text or "")
+            if text.strip():
+                ext = os.path.splitext(self.file_path)[1].lower().lstrip(".")
+                return [Document(
+                    page_content=text,
+                    metadata={"source": self.file_path, "file_type": ext or "hwp"}
+                )]
+            return []
+        except Exception:
+            return []
+
 # Define Loaders (Must match ingest.py roughly)
 LOADERS = {
     ".pdf": PyPDFLoader,
     ".docx": Docx2txtLoader,
     ".xlsx": UnstructuredExcelLoader,
     ".xls": UnstructuredExcelLoader,
+    ".hwp": HwpLoader,
+    ".hwpx": HwpLoader,
     ".txt": TextLoader,
     ".html": UnstructuredHTMLLoader,
     ".htm": UnstructuredHTMLLoader,

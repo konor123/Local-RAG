@@ -27,13 +27,13 @@ LOG_FILE = os.environ.get("EMBED_LOG_PATH", runtime_path("logs", "embed_log.txt"
 # 임베딩 가능한 확장자
 EMBEDDABLE_EXTENSIONS = {
     ".pdf", ".docx", ".doc", ".xlsx", ".xls",
-    ".pptx", ".ppt", ".txt", ".html", ".htm"
+    ".pptx", ".ppt", ".hwp", ".hwpx", ".txt", ".html", ".htm"
 }
 
 PRIORITY_EXTS = {
     ".xlsx": 0, ".xls": 0,
     ".docx": 1, ".doc": 1,
-    ".hwp": 1, ".txt": 1,
+    ".hwp": 1, ".hwpx": 1, ".txt": 1,
     ".pptx": 2, ".ppt": 2,
     ".pdf": 3,
     ".dwg": 99,
@@ -231,18 +231,35 @@ class BackgroundEmbedder:
                 return False
             
             output = result.stdout.strip()
-            if not output:
-                _log.debug(f"SKIP (empty output): {self._current_file}")
-                self._skip_count += 1
-                self._record_status(filepath, "empty_output")
-                return False
             if output == "ENCRYPTED_FILE":
                 _log.debug(f"SKIP (encrypted): {self._current_file}")
                 self._skip_count += 1
                 self._record_status(filepath, "empty_or_encrypted")
                 return False
+
+            data = []
+            ocr_already_applied = False
+            if not output:
+                if ext == ".pdf":
+                    try:
+                        from ocr_utils import augment_pdf_documents_with_ocr
+
+                        docs = augment_pdf_documents_with_ocr([], filepath)
+                        data = [
+                            {"page_content": doc.page_content, "metadata": doc.metadata}
+                            for doc in docs
+                        ]
+                        ocr_already_applied = bool(data)
+                    except Exception as ocr_error:
+                        _log.warning(f"FAIL (ocr empty-output fallback): {self._current_file} | {str(ocr_error)[:100]}")
+                if not data:
+                    _log.debug(f"SKIP (empty output): {self._current_file}")
+                    self._skip_count += 1
+                    self._record_status(filepath, "empty_output")
+                    return False
+            else:
+                data = json.loads(output)
             
-            data = json.loads(output)
             if isinstance(data, dict) and data.get("__loader_error__"):
                 category = data.get("category", "parse_error")
                 if category in ("unsupported_extension", "empty_or_encrypted"):
@@ -252,6 +269,26 @@ class BackgroundEmbedder:
                 self._record_status(filepath, category)
                 _log.warning(f"FAIL ({category}): {self._current_file} | {data.get('detail', '')[:100]}")
                 return False
+            if ext == ".pdf" and data and not ocr_already_applied:
+                try:
+                    from langchain_core.documents import Document
+                    from ocr_utils import augment_pdf_documents_with_ocr
+
+                    docs = [
+                        Document(
+                            page_content=item.get("page_content", ""),
+                            metadata=item.get("metadata", {})
+                        )
+                        for item in data
+                        if isinstance(item, dict) and "page_content" in item
+                    ]
+                    docs = augment_pdf_documents_with_ocr(docs, filepath)
+                    data = [
+                        {"page_content": doc.page_content, "metadata": doc.metadata}
+                        for doc in docs
+                    ]
+                except Exception as ocr_error:
+                    _log.warning(f"WARN (ocr augmentation failed): {self._current_file} | {str(ocr_error)[:100]}")
             if not data:
                 _log.debug(f"SKIP (no chunks): {self._current_file}")
                 self._skip_count += 1

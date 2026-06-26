@@ -10,17 +10,41 @@ import os
 import sys
 from pathlib import Path
 
+try:
+    from PyInstaller.utils.hooks import collect_data_files, collect_dynamic_libs, collect_submodules
+except Exception:
+    collect_data_files = collect_dynamic_libs = collect_submodules = None
+
+def _collect_optional(package_name, collector):
+    if collector is None:
+        return []
+    try:
+        return collector(package_name)
+    except Exception:
+        return []
+
 PROJECT_ROOT = Path(os.path.abspath(SPECPATH)).parent
+PADDLE_HIDDENIMPORTS = [
+    "paddle",
+    "paddleocr",
+    "pypdfium2",
+    "pypdfium2_raw",
+]
+PADDLE_HIDDENIMPORTS += _collect_optional("paddle", collect_submodules)
+PADDLE_HIDDENIMPORTS += _collect_optional("paddleocr", collect_submodules)
+PADDLE_DATAS = _collect_optional("paddleocr", collect_data_files)
+PADDLE_BINARIES = _collect_optional("paddle", collect_dynamic_libs)
+PADDLE_BINARIES += _collect_optional("pypdfium2_raw", collect_dynamic_libs)
 
 # Entry point
 a = Analysis(
     [str(PROJECT_ROOT / "native_ui.py")],
     pathex=[str(PROJECT_ROOT)],
-    binaries=[],
+    binaries=PADDLE_BINARIES,
     datas=[
         # None of the runtime data (cache, embeddings, logs) is shipped; the
         # installer copies them in.
-    ],
+    ] + PADDLE_DATAS,
     hiddenimports=[
         "langchain_community.document_loaders",
         "langchain_community.embeddings",
@@ -31,6 +55,8 @@ a = Analysis(
         "langchain.prompts",
         "ai_providers.local_qwen",
         "ai_providers.provider_manager",
+        "_version",
+        "update_checker",
         "turbovec",
         "faiss",
         "PySide6.QtCore",
@@ -38,8 +64,10 @@ a = Analysis(
         "PySide6.QtWidgets",
         "chardet",
         "unstructured",
+        "hwpkit",
+        "hwpkit.hwpx",
         "pptx",
-    ],
+    ] + PADDLE_HIDDENIMPORTS,
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],

@@ -27,7 +27,6 @@ from langchain_community.document_loaders import (
 )
 from langchain_community.document_loaders.base import BaseLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
-from langchain_community.embeddings import OllamaEmbeddings
 from langchain_community.vectorstores import Chroma
 from langchain_core.documents import Document
 import re
@@ -372,6 +371,28 @@ class LegacyDocLoader(BaseLoader):
              return [Document(page_content=text, metadata=metadata)]
          return []
 
+class HwpLoader(BaseLoader):
+     """Loader for HWP/HWPX files using hwpkit."""
+     def __init__(self, file_path: str):
+         self.file_path = file_path
+
+     def load(self) -> List[Document]:
+         try:
+             from hwpkit import extract_text_from_file
+
+             text = extract_text_from_file(self.file_path)
+             if isinstance(text, (list, tuple)):
+                 text = "\n".join(str(item) for item in text if item)
+             text = str(text or "")
+             if text.strip():
+                 ext = os.path.splitext(self.file_path)[1].lower().lstrip(".")
+                 metadata = {"source": self.file_path, "file_type": ext or "hwp"}
+                 return [Document(page_content=text, metadata=metadata)]
+             return []
+         except Exception as e:
+             print(f"Error loading HWP/HWPX {self.file_path}: {e}")
+             return []
+
 import traceback
 
 def send_status_notification(message):
@@ -381,8 +402,6 @@ def send_status_notification(message):
 # Configuration
 DRIVES = get_search_roots()
 VECTOR_STORE_PATH = os.environ.get("VECTOR_STORE_PATH", runtime_path("chroma_db_ko"))  # Korean-optimized embeddings
-EMBEDDING_MODEL = "all-minilm"
-OLLAMA_BASE_URL = "http://localhost:11434"
 TEST_LIMIT = int(os.environ.get("INDEX_SAMPLE_LIMIT", "0") or 0)  # 0 means full indexing
 INDEX_SAMPLE_MODE = os.environ.get("INDEX_SAMPLE_MODE", "priority_first").lower()
 # Sample runs are report-only by default so processed tracker and vector index are not polluted.
@@ -399,7 +418,7 @@ RESET_DB = False  # DO NOT RESET DB usually
 PRIORITY_EXTS = {
     ".xlsx": 0, ".xls": 0,
     ".docx": 1, ".doc": 1,
-    ".hwp": 1, ".txt": 1,
+    ".hwp": 1, ".hwpx": 1, ".txt": 1,
     ".pptx": 2, ".ppt": 2,
     ".pdf": 3,
     ".dwg": 99,
@@ -437,6 +456,8 @@ LOADERS = {
     ".pptx": PPTXLoader, # Use our custom lighter loader
     ".ppt": LegacyPPTLoader, # Wrap to handle LibreOffice errors gracefully
     ".dwg": DWGLoader,
+    ".hwp": HwpLoader,
+    ".hwpx": HwpLoader,
     ".txt": TextLoader,
     ".html": UnstructuredHTMLLoader,
     ".htm": UnstructuredHTMLLoader,
@@ -668,6 +689,18 @@ def recover_from_crash():
         except:
             pass
 
+def augment_pdf_docs_with_ocr(docs: List[Document], file_path: str) -> List[Document]:
+    """Run main-process OCR for PDFs and use OCR text on weak extracted pages."""
+    try:
+        from ocr_utils import augment_pdf_documents_with_ocr
+
+        augmented_docs = augment_pdf_documents_with_ocr(docs, file_path)
+        if augmented_docs:
+            return augmented_docs
+    except Exception as e:
+        print(f"   [OCR] PDF OCR augmentation failed: {os.path.basename(file_path)} | {e}")
+    return docs
+
 def load_document(file_path: str) -> List[Document]:
     MAX_RETRIES = 3
     RETRY_DELAY = 5  # seconds
@@ -679,8 +712,8 @@ def load_document(file_path: str) -> List[Document]:
             record_index_status(file_path, STATUS_TEMPORARY, "Office temporary lock file")
             return []
         
-        # 1. Handle Custom Loaders (PPT/DWG) in-process (they are safer/custom)
-        if ext in [".ppt", ".pptx", ".dwg", ".doc"]: # Legacy/Custom
+        # 1. Handle Custom Loaders (PPT/DWG/HWP) in-process (they are safer/custom)
+        if ext in [".ppt", ".pptx", ".dwg", ".doc", ".hwp", ".hwpx"]: # Legacy/Custom
             loader_cls = LOADERS.get(ext)
             if loader_cls:
                 for attempt in range(MAX_RETRIES):
@@ -731,6 +764,11 @@ def load_document(file_path: str) -> List[Document]:
                          return []
                           
                     if not output:
+                        if ext == ".pdf":
+                            docs = augment_pdf_docs_with_ocr([], file_path)
+                            if docs:
+                                record_index_status(file_path, STATUS_OK)
+                                return docs
                         record_index_status(file_path, STATUS_EMPTY, "worker returned empty stdout")
                         return []
                      
@@ -742,6 +780,8 @@ def load_document(file_path: str) -> List[Document]:
                         docs = []
                         for item in data:
                             docs.append(Document(page_content=item['page_content'], metadata=item['metadata']))
+                        if ext == ".pdf":
+                            docs = augment_pdf_docs_with_ocr(docs, file_path)
                         if docs:
                             record_index_status(file_path, STATUS_OK)
                         else:
@@ -790,9 +830,11 @@ def get_existing_sources() -> set:
         return set()
     print("Checking existing index in ChromaDB (this might take a while)...")
     try:
-        embeddings = OllamaEmbeddings(
-            model=EMBEDDING_MODEL,
-            base_url=OLLAMA_BASE_URL,
+        from langchain_community.embeddings import HuggingFaceEmbeddings
+        embeddings = HuggingFaceEmbeddings(
+            model_name="dragonkue/multilingual-e5-small-ko",
+            model_kwargs={"device": "cpu"},
+            encode_kwargs={"normalize_embeddings": True},
         )
         vectorstore = Chroma(
             persist_directory=VECTOR_STORE_PATH,

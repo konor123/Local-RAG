@@ -7,7 +7,7 @@
 
 #define MyAppName "OSL RAG Internal"
 #define MyAppNameShort "OSL RAG Internal"
-#define MyAppVersion "1.0.0"
+#define MyAppVersion "1.1.0"
 #define MyAppPublisher "OSL ENG"
 #define MyAppURL "https://example.com"
 #define MyAppExeName "native_ui.exe"
@@ -21,6 +21,7 @@
 AppId={{B4E7E5C0-0000-4000-9000-000000000001}
 AppName={#MyAppName}
 AppVersion={#MyAppVersion}
+VersionInfoVersion={#MyAppVersion}
 AppPublisher={#MyAppPublisher}
 AppPublisherURL={#MyAppURL}
 DefaultDirName={autopf}\{#MyAppName}
@@ -37,6 +38,7 @@ UninstallDisplayIcon={app}\{#MyAppExeName}
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 Uninstallable=yes
+CloseApplications=yes
 MinVersion=10.0
 
 [Languages]
@@ -215,7 +217,6 @@ begin
 
   if not RunOllamaModelPull('exaone3.5:2.4b', 'EXAONE 기본 모델') then Exit;
   if not RunOllamaModelPull('qwen3.5:4b', 'Qwen 어드바이저 모델') then Exit;
-  if not RunOllamaModelPull('all-minilm', 'Ollama 임베딩 모델') then Exit;
   Result := True;
 end;
 

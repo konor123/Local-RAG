@@ -24,9 +24,12 @@ from PySide6.QtGui import QAction, QCloseEvent, QColor, QIcon, QPainter, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
     QHBoxLayout,
+    QLabel,
     QLineEdit,
     QMainWindow,
     QMenu,
+    QMessageBox,
+    QProgressDialog,
     QPushButton,
     QSystemTrayIcon,
     QTextBrowser,
@@ -38,6 +41,8 @@ from background_embedder import BackgroundEmbedder
 from cache_manager import CacheManager
 from config_manager import load_config, save_config
 from unified_engine import get_unified_response
+from _version import __version__
+from update_checker import check_for_update, download_and_prepare_update, launch_installer
 
 
 APP_TITLE = "OSL RAG Internal"
@@ -547,6 +552,7 @@ class ChatWindow(QMainWindow):
         self._build_tray()
         self._start_background()
         self._start_preload()
+        QTimer.singleShot(3000, self._check_updates_on_startup)
 
     # ─── UI ───────────────────────────────────────────
     def _build_ui(self) -> None:
@@ -554,6 +560,11 @@ class ChatWindow(QMainWindow):
         layout = QVBoxLayout(central)
         layout.setContentsMargins(8, 8, 8, 8)
         layout.setSpacing(6)
+
+        self.version_label = QLabel(f"버전: v{__version__}")
+        self.version_label.setAlignment(Qt.AlignmentFlag.AlignRight)
+        self.version_label.setStyleSheet("color:#6b7280;font-size:11px")
+        layout.addWidget(self.version_label)
 
         self.chat_view = ChatBrowser()
         self.chat_view.anchorClicked.connect(lambda url: _open_folder(ChatBrowser._decode_anchor(url.toString()) or ""))
@@ -587,6 +598,9 @@ class ChatWindow(QMainWindow):
         reset_action = QAction("🗑️ 대화 초기화", self)
         reset_action.triggered.connect(self.reset_chat)
         menu.addAction(reset_action)
+        update_action = QAction("업데이트 확인", self)
+        update_action.triggered.connect(lambda: self.check_for_updates(silent=False))
+        menu.addAction(update_action)
         menu.addSeparator()
         self._startup_action = QAction("시스템 시작 시 실행", self)
         self._startup_action.setCheckable(True)
@@ -639,6 +653,90 @@ class ChatWindow(QMainWindow):
             self._cache_action.setText(self.bg.cache_text())
             self._embed_action.setText(self.bg.embed_text())
             self.tray.setToolTip(f"{self.bg.cache_text()}\n{self.bg.embed_text()}")
+
+    def _check_updates_on_startup(self) -> None:
+        auto_update = load_config().get("auto_update", {})
+        if auto_update.get("enabled", True) and auto_update.get("check_on_startup", True):
+            self.check_for_updates(silent=True)
+
+    def check_for_updates(self, silent: bool = False) -> None:
+        config = load_config()
+        auto_update = config.setdefault("auto_update", {})
+        try:
+            update_info = check_for_update(
+                __version__,
+                skipped_version=auto_update.get("last_skipped_version"),
+            )
+            auto_update["last_check_time"] = time.strftime("%Y-%m-%dT%H:%M:%S")
+            save_config(config)
+        except Exception as e:
+            if not silent:
+                QMessageBox.warning(self, "업데이트 확인 실패", f"업데이트 확인 중 오류가 발생했습니다.\n\n{e}")
+            return
+
+        if not update_info.get("update_available"):
+            if not silent:
+                QMessageBox.information(self, "업데이트 확인", "현재 최신 버전을 사용 중입니다.")
+            return
+
+        if silent:
+            self.tray.showMessage(
+                APP_TITLE,
+                f"새 버전 {update_info.get('latest_tag')} 업데이트가 있습니다.",
+                QSystemTrayIcon.MessageIcon.Information,
+                5000,
+            )
+        self._prompt_update(update_info)
+
+    def _prompt_update(self, update_info: dict) -> None:
+        size = update_info.get("size") or 0
+        size_text = f"{size / (1024 * 1024):.1f} MB" if size else "알 수 없음"
+        body = (update_info.get("body") or "").strip()
+        if len(body) > 800:
+            body = body[:800] + "..."
+
+        box = QMessageBox(self)
+        box.setWindowTitle("업데이트 가능")
+        box.setIcon(QMessageBox.Icon.Information)
+        box.setText(f"새 버전 {update_info.get('latest_tag')}이 있습니다.")
+        box.setInformativeText(f"크기: {size_text}\n\n{body or '릴리즈 노트가 없습니다.'}")
+        update_button = box.addButton("업데이트", QMessageBox.ButtonRole.AcceptRole)
+        later_button = box.addButton("나중에", QMessageBox.ButtonRole.RejectRole)
+        skip_button = box.addButton("이 버전 건너뛰기", QMessageBox.ButtonRole.DestructiveRole)
+        box.exec()
+
+        clicked = box.clickedButton()
+        if clicked == update_button:
+            self._download_and_launch_update(update_info)
+        elif clicked == skip_button:
+            config = load_config()
+            auto_update = config.setdefault("auto_update", {})
+            auto_update["last_skipped_version"] = update_info.get("latest_tag")
+            save_config(config)
+        elif clicked == later_button:
+            return
+
+    def _download_and_launch_update(self, update_info: dict) -> None:
+        progress = QProgressDialog("업데이트 다운로드 중...", "취소", 0, 100, self)
+        progress.setWindowTitle("업데이트")
+        progress.setWindowModality(Qt.WindowModality.WindowModal)
+        progress.setMinimumDuration(0)
+
+        def on_progress(downloaded: int, total: int) -> None:
+            if total:
+                progress.setValue(min(100, int(downloaded * 100 / total)))
+            QApplication.processEvents()
+            if progress.wasCanceled():
+                raise RuntimeError("업데이트 다운로드가 취소되었습니다.")
+
+        try:
+            installer_path = download_and_prepare_update(update_info, on_progress)
+            progress.setValue(100)
+            launch_installer(installer_path)
+            self.quit_app()
+        except Exception as e:
+            progress.close()
+            QMessageBox.warning(self, "업데이트 실패", f"업데이트를 완료하지 못했습니다.\n\n{e}")
 
     def _start_background(self) -> None:
         self.bg.start()

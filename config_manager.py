@@ -39,6 +39,12 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "cloud": {"enabled": False},
     },
     "native_ui": {"start_hidden": False, "minimize_to_tray": True, "start_with_system": True},
+    "auto_update": {
+        "enabled": True,
+        "check_on_startup": True,
+        "last_check_time": None,
+        "last_skipped_version": None,
+    },
     "search": {
         "drive_mode": "connected",
         "include_local_drives": True,
