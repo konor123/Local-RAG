@@ -56,3 +56,8 @@ gemini_*.html
 Thumbs.db
 .DS_Store
 desktop.ini
+
+# Release binaries (uploaded via GitHub Releases, not git)
+packaging/output/*.exe
+packaging/output/*.sha256.txt
+

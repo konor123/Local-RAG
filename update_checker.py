@@ -1,4 +1,4 @@
-"""Semi-automatic GitHub Release updater for OSL RAG Internal."""
+"""Semi-automatic GitHub Release updater for OSL AI Assistant."""
 from __future__ import annotations
 
 import hashlib
@@ -18,7 +18,7 @@ SHA256_SUFFIX = ".sha256.txt"
 
 HTTP_HEADERS = {
     "Accept": "application/vnd.github+json",
-    "User-Agent": "OSL-RAG-Internal-Updater/1.1.0",
+    "User-Agent": "OSL-AI-Assistant-Updater/1.2.0",
 }
 
 
@@ -121,8 +121,8 @@ def download_and_prepare_update(update_info: Dict, progress_callback: Optional[C
     installer_asset = update_info.get("installer_asset")
     if not installer_asset:
         raise RuntimeError("업데이트 설치 파일 자산을 찾을 수 없습니다.")
-    installer_name = installer_asset.get("name") or "OSL_RAG_Internal_Setup.exe"
-    temp_dir = Path(tempfile.gettempdir()) / "OSL RAG Internal Updates"
+    installer_name = installer_asset.get("name") or "OSL_AI_Assistant_Setup.exe"
+    temp_dir = Path(tempfile.gettempdir()) / "OSL AI Assistant Updates"
     installer_path = temp_dir / installer_name
     download_file(_asset_download_url(installer_asset), installer_path, progress_callback)
 

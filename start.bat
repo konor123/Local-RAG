@@ -14,6 +14,6 @@ if "%OSL_RAG_OLLAMA_BASE_URL%"=="" set OSL_RAG_OLLAMA_BASE_URL=http://localhost:
 
 rem Native UI
 cd /D "%~dp0"
-start "OSL RAG Internal" /B /D "%~dp0" cmd /C "py -3.12 native_ui.py 1> logs\native_ui_debug.log 2>&1"
+start "OSL AI Assistant" /B /D "%~dp0" cmd /C "py -3.12 native_ui.py 1> logs\native_ui_debug.log 2>&1"
 
 exit

@@ -1,18 +1,20 @@
 ; -*- Inno Setup Script -*-
-; OSL RAG Internal Inno Setup installer script.
+; OSL AI Assistant Inno Setup installer script.
 ; Bundles the PyInstaller-built native_ui, Ollama binary, and LibreOffice
 ; installer. Required Ollama models are downloaded during setup.
 ; Run `packaging\build.ps1`
 ; to produce a packed `deps/` directory, then compile with Inno Setup.
 
-#define MyAppName "OSL RAG Internal"
-#define MyAppNameShort "OSL RAG Internal"
-#define MyAppVersion "1.1.0"
+#define MyAppName "OSL AI Assistant"
+#define MyAppNameShort "OSL AI Assistant"
+#define MyAppNameShortNoSpace "OSL_AI_Assistant"
+#define MyAppVersion "1.2.0"
 #define MyAppPublisher "OSL ENG"
 #define MyAppURL "https://example.com"
 #define MyAppExeName "native_ui.exe"
 #define MyOllamaExeName "ollama.exe"
 #define MyLibreOfficeMsi "LibreOffice.msi"
+#define MyLegacyAppNameShort "OSL RAG Internal"
 
 [Setup]
 ; Internal signing is the installer's responsibility; the build script
@@ -29,7 +31,7 @@ DisableProgramGroupPage=yes
 PrivilegesRequired=admin
 PrivilegesRequiredOverridesAllowed=dialog
 OutputDir=output
-OutputBaseFilename=OSL_RAG_Internal_Setup
+OutputBaseFilename=OSL_AI_Assistant_Setup
 Compression=lzma2/ultra64
 SolidCompression=yes
 WizardStyle=modern
@@ -54,6 +56,9 @@ Source: "..\dist\native_ui\*"; DestDir: "{app}"; Flags: recursesubdirs ignorever
 
 ; Ollama binary
 Source: "deps\ollama\{#MyOllamaExeName}"; DestDir: "{app}\ollama"; Flags: ignoreversion
+
+; Ollama runtime support files (llama-server.exe, DLLs, etc.)
+Source: "deps\ollama\lib\ollama\*"; DestDir: "{app}\ollama\lib\ollama"; Flags: recursesubdirs ignoreversion skipifsourcedoesntexist
 
 ; LibreOffice installer (run silently post-install)
 Source: "deps\{#MyLibreOfficeMsi}"; DestDir: "{tmp}"; Flags: ignoreversion deleteafterinstall
@@ -86,19 +91,22 @@ Filename: "{sys}\msiexec.exe"; Parameters: "/i ""{tmp}\{#MyLibreOfficeMsi}"" /pa
     Flags: waituntilterminated; Check: ShouldInstallLibreOffice
 
 ; 2) Launch the app
-Filename: "{app}\{#MyAppExeName}"; Description: "OSL RAG Internal 실행"; Flags: nowait postinstall skipifsilent
+Filename: "{app}\{#MyAppExeName}"; Description: "OSL AI Assistant 실행"; Flags: nowait postinstall skipifsilent
 
 [UninstallDelete]
 ; Clean up runtime state created by the app
 Type: filesandordirs; Name: "{userappdata}\{#MyAppNameShort}"
 Type: filesandordirs; Name: "{localappdata}\{#MyAppNameShort}"
+Type: filesandordirs; Name: "{userappdata}\{#MyLegacyAppNameShort}"
+Type: filesandordirs; Name: "{localappdata}\{#MyLegacyAppNameShort}"
 Type: filesandordirs; Name: "{app}\logs"
 Type: filesandordirs; Name: "{app}\cache"
 Type: filesandordirs; Name: "{app}\*.cache"
 Type: filesandordirs; Name: "{app}\file_list_cache.json"
 Type: filesandordirs; Name: "{app}\embed_log.txt"
 Type: filesandordirs; Name: "{app}\chat_memory.json"
-Type: filesandordirs; Name: "{userstartup}\{#MyAppNameShort}.bat"
+Type: filesandordirs; Name: "{userstartup}\{#MyAppNameShortNoSpace}.bat"
+Type: filesandordirs; Name: "{userstartup}\{#MyLegacyAppNameShort}.bat"
 
 [Code]
 var
@@ -243,7 +251,7 @@ begin
     if WizardIsTaskSelected('startup') then
     begin
       // Use a .bat launcher (matches native_ui.py _enable_startup).
-      BatPath := ExpandConstant('{userstartup}\{#MyAppNameShort}.bat');
+      BatPath := ExpandConstant('{userstartup}\{#MyAppNameShortNoSpace}.bat');
       BatContent :=
         '@echo off' + #13#10 +
         'start "" "' + ExpandConstant('{app}\{#MyAppExeName}') + '"' + #13#10;

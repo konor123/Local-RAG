@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Minimal PySide6 native UI for OSL RAG Internal.
+"""Minimal PySide6 native UI for OSL AI Assistant.
 
 Layout: only chat thread + input box. All thinking/tool/reference events
 render inline in the chat. Cache refresh and embedding run continuously in
@@ -45,7 +45,7 @@ from _version import __version__
 from update_checker import check_for_update, download_and_prepare_update, launch_installer
 
 
-APP_TITLE = "OSL RAG Internal"
+APP_TITLE = "OSL AI Assistant"
 FILE_URL_PREFIX = "file-oslref:///"
 OLLAMA_URL = "http://127.0.0.1:11434"
 _ollama_process: Optional[subprocess.Popen] = None
@@ -257,7 +257,7 @@ def _startup_shortcut_path() -> Optional[Path]:
     folder = _startup_folder()
     if folder is None:
         return None
-    return folder / "OSL RAG Internal.bat"
+    return folder / "OSL_AI_Assistant.bat"
 
 
 def _running_executable() -> str:
@@ -592,7 +592,7 @@ class ChatWindow(QMainWindow):
         menu.addAction(self._cache_action)
         menu.addAction(self._embed_action)
         menu.addSeparator()
-        show_action = QAction("OSL RAG 열기", self)
+        show_action = QAction("OSL AI Assistant 열기", self)
         show_action.triggered.connect(self.show_normal)
         menu.addAction(show_action)
         reset_action = QAction("🗑️ 대화 초기화", self)
@@ -804,7 +804,7 @@ class ChatWindow(QMainWindow):
 
     def _append_assistant(self, content: str, sources: list) -> None:
         html_content = _markdown_to_html(content)
-        html_parts = [f'<div style="margin:10px 0"><b style="color:#1b5e20">OSL RAG</b><br>{html_content}</div>']
+        html_parts = [f'<div style="margin:10px 0"><b style="color:#1b5e20">OSL AI Assistant</b><br>{html_content}</div>']
         if sources:
             html_parts.append('<div style="margin:6px 0 10px 14px">')
             html_parts.append('<b style="color:#374151">📎 참조 파일</b><br>')

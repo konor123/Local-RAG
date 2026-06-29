@@ -203,7 +203,7 @@ def send_windows_notification(title, message):
         $textNodes = $template.GetElementsByTagName("text")
         $textNodes.Item(0).AppendChild($template.CreateTextNode("{title}")) > $null
         $textNodes.Item(1).AppendChild($template.CreateTextNode("{message}")) > $null
-        $notifier = [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier("OSL RAG Ingest")
+        $notifier = [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier("OSL AI Assistant Ingest")
         $notifier.Show([Windows.UI.Notifications.ToastNotification($template)])
         """
         subprocess.run(["powershell", "-Command", ps_script], check=False)

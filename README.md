@@ -1,1 +1,1 @@
-# OSL RAG Internal
+# OSL AI Assistant

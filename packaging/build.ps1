@@ -1,5 +1,5 @@
 <#
-OSL RAG Internal build automation.
+OSL AI Assistant build automation.
 
 Phases:
   1. Clean previous build artifacts.
@@ -76,6 +76,25 @@ if (-not (Test-Path $ollamaSrc)) {
 if (Test-Path $ollamaSrc) {
     Copy-Item -LiteralPath $ollamaSrc -Destination (Join-Path (Join-Path $Deps "ollama") "ollama.exe") -Force
     Ok "copied ollama.exe"
+
+    # Stage CPU Ollama runtime support files (llama-server, DLLs, etc.)
+    $ollamaRoot    = Split-Path -Parent $ollamaSrc
+    $ollamaLibSrc  = Join-Path $ollamaRoot "lib\ollama"
+    $ollamaLibDst  = Join-Path (Join-Path $Deps "ollama") "lib\ollama"
+    if (Test-Path $ollamaLibSrc) {
+        New-Item -ItemType Directory -Path $ollamaLibDst -Force | Out-Null
+        # Copy required top-level runtime files (no GPU/backend subdirs)
+        Get-ChildItem -LiteralPath $ollamaLibSrc -File | Where-Object {
+            $_.Name -in @("llama-server.exe", "llama-quantize.exe") -or
+            $_.Extension -eq ".dll"
+        } | Copy-Item -Destination $ollamaLibDst -Force
+        if (-not (Test-Path (Join-Path $ollamaLibDst "llama-server.exe"))) {
+            Fail "llama-server.exe not found in staged Ollama lib directory"
+        }
+        Ok "staged CPU Ollama runtime files (llama-server.exe, DLLs) to deps\ollama\lib\ollama"
+    } else {
+        Write-Host "    [WARN] Older monolithic Ollama layout assumed (no lib\ollama subdirectory)" -ForegroundColor Yellow
+    }
 } else {
     Fail "Ollama not found. Install from https://ollama.com and re-run."
 }
@@ -106,6 +125,14 @@ if ($existing) {
 if ($SkipInnoSetup) {
     Step "Skipping Inno Setup (--SkipInnoSetup)"
 } else {
+    Step "Cleaning previous Inno Setup outputs"
+    $output = Join-Path $Packaging "output"
+    if (Test-Path $output) {
+        Remove-Item -LiteralPath $output -Recurse -Force
+        Ok "removed $output"
+    }
+    New-Item -ItemType Directory -Path $output -Force | Out-Null
+
     Step "Compiling Inno Setup installer"
     $iscc = (Get-Command iscc.exe -ErrorAction SilentlyContinue)
     if (-not $iscc) {
@@ -126,7 +153,6 @@ if ($SkipInnoSetup) {
 
 # ── 6. summary ────────────────────────────────────────────────
 Step "Build complete"
-$output = Join-Path $Packaging "output"
 if (Test-Path $output) {
     Get-ChildItem $output | ForEach-Object { Ok "$($_.FullName)" }
 } else {

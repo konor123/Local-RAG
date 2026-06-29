@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""User configuration for the OSL RAG Internal local build."""
+"""User configuration for the OSL AI Assistant local build."""
 from __future__ import annotations
 
 import json
@@ -9,7 +9,10 @@ from pathlib import Path
 from typing import Any, Dict
 
 
-APP_NAME = "OSL RAG Internal"
+from runtime_paths import APP_NAME as APP_NAME  # re-exported for back-compat
+
+
+OLD_APP_NAME = "OSL RAG Internal"
 
 DEFAULT_CONFIG: Dict[str, Any] = {
     "ai_provider": {
@@ -65,15 +68,42 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     },
     "vector": {
         "backend": "turbovec",
-        "index_dir": "%LOCALAPPDATA%/OSL RAG Internal/turbovec_index",
-        "processed_files_path": "%LOCALAPPDATA%/OSL RAG Internal/processed_files_turbovec.txt",
+        "index_dir": "%LOCALAPPDATA%/OSL AI Assistant/turbovec_index",
+        "processed_files_path": "%LOCALAPPDATA%/OSL AI Assistant/processed_files_turbovec.txt",
     },
 }
 
 
+def _migrate_legacy_appdata_dir(new_path: Path) -> None:
+    """Move a legacy ``%APPDATA%/OSL RAG Internal`` directory to the new path
+    on first run so existing users keep their ``config.json`` and other Roaming
+    data. Best-effort; failures are swallowed and the new path is still
+    created so the app can start.
+    """
+    import shutil
+
+    if new_path.exists():
+        return
+    base = new_path.parent
+    legacy = base / OLD_APP_NAME
+    if not legacy.exists() or not legacy.is_dir():
+        return
+    new_path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        shutil.move(str(legacy), str(new_path))
+    except OSError:
+        try:
+            shutil.copytree(str(legacy), str(new_path))
+        except OSError:
+            new_path.mkdir(parents=True, exist_ok=True)
+
+
 def _appdata_dir() -> Path:
     base = os.environ.get("APPDATA") or str(Path.home() / "AppData" / "Roaming")
-    return Path(base) / APP_NAME
+    new_path = Path(base) / APP_NAME
+    _migrate_legacy_appdata_dir(new_path)
+    new_path.mkdir(parents=True, exist_ok=True)
+    return new_path
 
 
 def _config_path() -> Path:

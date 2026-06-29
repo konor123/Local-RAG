@@ -1,1 +1,1 @@
-"""AI provider package for OSL RAG Internal."""
+"""AI provider package for OSL AI Assistant."""

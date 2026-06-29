@@ -8,6 +8,7 @@ openpyxl
 python-docx
 python-pptx
 faiss-cpu
+sentence-transformers
 turbovec>=0.8.0
 google-genai
 xlrd
