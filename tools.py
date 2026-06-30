@@ -535,7 +535,8 @@ def grep_content(keyword: str, path: str = None, drives: Optional[List[str]] = N
                 text=True,
                 timeout=30,
                 encoding="cp949",
-                errors="ignore"
+                errors="ignore",
+                creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
             )
             
             if result.stdout:

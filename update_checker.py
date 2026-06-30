@@ -18,7 +18,7 @@ SHA256_SUFFIX = ".sha256.txt"
 
 HTTP_HEADERS = {
     "Accept": "application/vnd.github+json",
-    "User-Agent": "OSL-AI-Assistant-Updater/1.2.3",
+    "User-Agent": "OSL-AI-Assistant-Updater/1.2.4",
 }
 
 
@@ -140,6 +140,6 @@ def download_and_prepare_update(update_info: Dict, progress_callback: Optional[C
 def launch_installer(installer_path: Path) -> None:
     args = [str(installer_path), "/SP-", "/SUPPRESSMSGBOXES", "/NORESTART"]
     if os.name == "nt":
-        subprocess.Popen(args, close_fds=True)
+        subprocess.Popen(args, close_fds=True, creationflags=subprocess.CREATE_NO_WINDOW)
     else:
         subprocess.Popen(args)

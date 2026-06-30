@@ -206,7 +206,8 @@ def send_windows_notification(title, message):
         $notifier = [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier("OSL AI Assistant Ingest")
         $notifier.Show([Windows.UI.Notifications.ToastNotification($template)])
         """
-        subprocess.run(["powershell", "-Command", ps_script], check=False)
+        subprocess.run(["powershell", "-Command", ps_script], check=False,
+                      creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0)
     except Exception as e:
         print(f"Failed to send notification: {e}")
 
@@ -307,7 +308,14 @@ def convert_with_soffice(file_path: str, format="txt") -> str:
         try:
             # Capture output to avoid console spam, but we typically ignore it unless error
             # Add timeout to prevent hanging on corrupt files
-            subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=60)
+            subprocess.run(
+                cmd,
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=60,
+                creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
+            )
             
             # Find the result file
             # Original: My File.ppt -> My File.txt
@@ -1004,7 +1012,8 @@ def ingest_data():
                 text=True,
                 encoding='utf-8',
                 bufsize=1, # Line buffered
-                env=env
+                env=env,
+                creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
             )
             output_queue = start_stdout_reader(p)
             # Handshake: Wait for READY

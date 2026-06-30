@@ -38,6 +38,7 @@ def _net_use_drives() -> List[str]:
             errors="replace",
             timeout=5,
             check=False,
+            creationflags=subprocess.CREATE_NO_WINDOW,
         )
     except Exception:
         return []
