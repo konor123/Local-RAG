@@ -201,75 +201,23 @@ class BackgroundEmbedder:
             return False
         
         try:
-            # 파일 로드 (subprocess로 안전하게)
-            import subprocess
-            
-            env = os.environ.copy()
-            env["PYTHONIOENCODING"] = "utf-8"
-            
-            # Windows에서 팝업 창 숨기기
-            startupinfo = None
-            if os.name == 'nt':
-                startupinfo = subprocess.STARTUPINFO()
-                startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-                startupinfo.wShowWindow = subprocess.SW_HIDE
-            
-            result = subprocess.run(
-                ["python", "worker_loader.py", filepath],
-                capture_output=True,
-                text=True,
-                encoding='utf-8',
-                timeout=120,
-                env=env,
-                startupinfo=startupinfo
-            )
-            
-            if result.returncode != 0:
-                _log.warning(f"FAIL (worker exit {result.returncode}): {self._current_file} | {result.stderr[:100]}")
-                self._error_count += 1
-                self._record_status(filepath, _classify_error_text(result.stderr))
-                return False
-            
-            output = result.stdout.strip()
-            if output == "ENCRYPTED_FILE":
-                _log.debug(f"SKIP (encrypted): {self._current_file}")
-                self._skip_count += 1
-                self._record_status(filepath, "empty_or_encrypted")
-                return False
+            # 파일 로드 (direct import — frozen env 호환)
+            from worker_loader import load_file
 
-            data = []
-            ocr_already_applied = False
-            if not output:
-                if ext == ".pdf":
-                    try:
-                        from ocr_utils import augment_pdf_documents_with_ocr
+            data = load_file(filepath)
 
-                        docs = augment_pdf_documents_with_ocr([], filepath)
-                        data = [
-                            {"page_content": doc.page_content, "metadata": doc.metadata}
-                            for doc in docs
-                        ]
-                        ocr_already_applied = bool(data)
-                    except Exception as ocr_error:
-                        _log.warning(f"FAIL (ocr empty-output fallback): {self._current_file} | {str(ocr_error)[:100]}")
-                if not data:
-                    _log.debug(f"SKIP (empty output): {self._current_file}")
-                    self._skip_count += 1
-                    self._record_status(filepath, "empty_output")
-                    return False
-            else:
-                data = json.loads(output)
-            
             if isinstance(data, dict) and data.get("__loader_error__"):
                 category = data.get("category", "parse_error")
-                if category in ("unsupported_extension", "empty_or_encrypted"):
+                if category in ("unsupported_extension", "empty_or_encrypted", "temporary_file"):
                     self._skip_count += 1
                 else:
                     self._error_count += 1
                 self._record_status(filepath, category)
                 _log.warning(f"FAIL ({category}): {self._current_file} | {data.get('detail', '')[:100]}")
                 return False
-            if ext == ".pdf" and data and not ocr_already_applied:
+
+            # PDF OCR 보강
+            if ext == ".pdf" and data:
                 try:
                     from langchain_core.documents import Document
                     from ocr_utils import augment_pdf_documents_with_ocr
@@ -352,12 +300,6 @@ class BackgroundEmbedder:
                 self._record_status(filepath, "no_chunks")
                 return False
             
-        except subprocess.TimeoutExpired:
-            self._last_error = f"Timeout: {self._current_file}"
-            _log.warning(f"FAIL (timeout 120s): {self._current_file}")
-            self._error_count += 1
-            self._record_status(filepath, "timeout")
-            return False
         except Exception as e:
             self._last_error = f"Error: {self._current_file} - {str(e)[:100]}"
             _log.error(f"FAIL (exception): {self._current_file} | {str(e)[:150]}")

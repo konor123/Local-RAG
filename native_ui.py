@@ -51,6 +51,20 @@ OLLAMA_URL = "http://127.0.0.1:11434"
 _ollama_process: Optional[subprocess.Popen] = None
 
 
+def _asset_path(filename: str) -> str:
+    """Resolve an asset file path in both frozen (PyInstaller) and dev modes."""
+    candidates = []
+    if hasattr(sys, "_MEIPASS"):
+        candidates.append(Path(sys._MEIPASS) / "assets" / filename)
+    if getattr(sys, "frozen", False):
+        candidates.append(Path(sys.executable).resolve().parent / "_internal" / "assets" / filename)
+    candidates.append(Path(__file__).resolve().parent / "assets" / filename)
+    for c in candidates:
+        if c.exists():
+            return str(c)
+    return str(candidates[-1])
+
+
 # ─── Ollama lifecycle ──────────────────────────────────
 def _ollama_ready(timeout: float = 1.5) -> bool:
     try:
@@ -115,22 +129,8 @@ def _ensure_ollama_running() -> bool:
 
 
 # ─── Tray icon ──────────────────────────────────────────
-def _make_tray_icon(color: QColor = QColor(76, 175, 80)) -> QIcon:
-    pixmap = QPixmap(64, 64)
-    pixmap.fill(Qt.GlobalColor.transparent)
-    painter = QPainter(pixmap)
-    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-    painter.setBrush(color)
-    painter.setPen(Qt.PenStyle.NoPen)
-    painter.drawEllipse(4, 4, 56, 56)
-    painter.setPen(Qt.GlobalColor.white)
-    font = painter.font()
-    font.setBold(True)
-    font.setPointSize(24)
-    painter.setFont(font)
-    painter.drawText(pixmap.rect(), Qt.AlignmentFlag.AlignCenter, "R")
-    painter.end()
-    return QIcon(pixmap)
+def _make_tray_icon() -> QIcon:
+    return QIcon(_asset_path("tray_icon.png"))
 
 
 def _escape(text: str) -> str:
@@ -178,7 +178,7 @@ def _markdown_to_html(text: str) -> str:
     merged = _re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", merged)
     merged = _re.sub(r"(?<!\*)\*(?!\*)(.+?)\*(?!\*)", r"<i>\1</i>", merged)
     merged = _re.sub(r"`([^`]+)`",
-        '<code style="background:#e2e8f0;padding:1px 4px;border-radius:3px">\\1</code>',
+        '<code style="background:#1e293b;color:#e2e8f0;padding:1px 4px;border-radius:3px">\\1</code>',
         merged)
     # Links: [text](url) — but only for non-file anchors to avoid conflicting with file:// rendering
     def _link_replace(match: "re.Match[str]") -> str:
@@ -541,6 +541,7 @@ class ChatWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle(APP_TITLE)
+        self.setWindowIcon(QIcon(_asset_path("app_icon.png")))
         self.resize(900, 720)
 
         self.bg = BackgroundTaskManager(self)
@@ -799,15 +800,15 @@ class ChatWindow(QMainWindow):
     def _append_user(self, content: str) -> None:
         html_content = _escape(content).replace("\n", "<br>")
         self.chat_view.append(
-            f'<div style="margin:10px 0"><b style="color:#0b5cad">사용자</b><br>{html_content}</div>'
+            f'<div style="margin:10px 0"><b style="color:#60a5fa">사용자</b><br>{html_content}</div>'
         )
 
     def _append_assistant(self, content: str, sources: list) -> None:
         html_content = _markdown_to_html(content)
-        html_parts = [f'<div style="margin:10px 0"><b style="color:#1b5e20">OSL AI Assistant</b><br>{html_content}</div>']
+        html_parts = [f'<div style="margin:10px 0"><b style="color:#4ade80">OSL AI Assistant</b><br>{html_content}</div>']
         if sources:
             html_parts.append('<div style="margin:6px 0 10px 14px">')
-            html_parts.append('<b style="color:#374151">📎 참조 파일</b><br>')
+            html_parts.append('<b style="color:#94a3b8">📎 참조 파일</b><br>')
             for src in sources:
                 path = src.get("source") or ""
                 if not path:
@@ -815,7 +816,7 @@ class ChatWindow(QMainWindow):
                 href = ChatBrowser.encode_path(path)
                 display = _escape(path)
                 html_parts.append(
-                    f'<a href="{href}" style="color:#3b82f6;text-decoration:underline">📂 {display}</a><br>'
+                    f'<a href="{href}" style="color:#60a5fa;text-decoration:underline">📂 {display}</a><br>'
                 )
             html_parts.append("</div>")
         self.chat_view.append("".join(html_parts))
@@ -864,6 +865,7 @@ def main() -> int:
     os.environ.setdefault("PYTHONIOENCODING", "utf-8")
     app = QApplication(sys.argv)
     app.setQuitOnLastWindowClosed(False)
+    app.setWindowIcon(QIcon(_asset_path("app_icon.png")))
     window = ChatWindow()
     if not load_config().get("native_ui", {}).get("start_hidden", False):
         window.show()

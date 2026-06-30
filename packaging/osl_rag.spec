@@ -103,15 +103,36 @@ if collect_all is not None:
 else:
     SCIPY_HIDDENIMPORTS = _collect_optional("scipy", collect_submodules)
 
+# transformers is the upstream dependency of sentence_transformers.
+# Without collect_all, PyInstaller misses submodules like
+# transformers.models.metaclip_2 that are imported at runtime.
+TRANSFORMERS_DATAS = []
+TRANSFORMERS_BINARIES = []
+TRANSFORMERS_HIDDENIMPORTS = []
+if collect_all is not None:
+    try:
+        (
+            TRANSFORMERS_DATAS,
+            TRANSFORMERS_BINARIES,
+            TRANSFORMERS_HIDDENIMPORTS,
+        ) = collect_all("transformers")
+    except Exception:
+        TRANSFORMERS_HIDDENIMPORTS = _collect_optional("transformers", collect_submodules)
+else:
+    TRANSFORMERS_HIDDENIMPORTS = _collect_optional("transformers", collect_submodules)
+
 # Entry point
 a = Analysis(
     [str(PROJECT_ROOT / "native_ui.py")],
     pathex=[str(PROJECT_ROOT)],
-    binaries=PADDLE_BINARIES + SENTENCE_TRANSFORMERS_BINARIES + HF_HUB_BINARIES + TQDM_BINARIES + SCIPY_BINARIES,
+    binaries=PADDLE_BINARIES + SENTENCE_TRANSFORMERS_BINARIES + HF_HUB_BINARIES + TQDM_BINARIES + SCIPY_BINARIES + TRANSFORMERS_BINARIES,
     datas=[
         # None of the runtime data (cache, embeddings, logs) is shipped; the
         # installer copies them in.
-    ] + PADDLE_DATAS + SENTENCE_TRANSFORMERS_DATAS + HF_HUB_DATAS + TQDM_DATAS + SCIPY_DATAS,
+        (str(PROJECT_ROOT / "assets" / "app_icon.png"), "assets"),
+        (str(PROJECT_ROOT / "assets" / "app_icon.ico"), "assets"),
+        (str(PROJECT_ROOT / "assets" / "tray_icon.png"), "assets"),
+    ] + PADDLE_DATAS + SENTENCE_TRANSFORMERS_DATAS + HF_HUB_DATAS + TQDM_DATAS + SCIPY_DATAS + TRANSFORMERS_DATAS,
     hiddenimports=[
         "langchain_community.document_loaders",
         "langchain_community.embeddings",
@@ -125,6 +146,7 @@ a = Analysis(
         "_version",
         "update_checker",
         "sentence_transformers",
+        "worker_loader",
         "turbovec",
         "faiss",
         "PySide6.QtCore",
@@ -135,7 +157,7 @@ a = Analysis(
         "hwpkit",
         "hwpkit.hwpx",
         "pptx",
-    ] + PADDLE_HIDDENIMPORTS + SENTENCE_TRANSFORMERS_HIDDENIMPORTS + HF_HUB_HIDDENIMPORTS + TQDM_HIDDENIMPORTS + SCIPY_HIDDENIMPORTS,
+    ] + PADDLE_HIDDENIMPORTS + SENTENCE_TRANSFORMERS_HIDDENIMPORTS + HF_HUB_HIDDENIMPORTS + TQDM_HIDDENIMPORTS + SCIPY_HIDDENIMPORTS + TRANSFORMERS_HIDDENIMPORTS,
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
@@ -171,6 +193,7 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
+    icon=str(PROJECT_ROOT / "assets" / "app_icon.ico"),
 )
 
 coll = COLLECT(

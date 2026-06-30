@@ -740,74 +740,33 @@ def load_document(file_path: str) -> List[Document]:
             record_index_status(file_path, STATUS_UNSUPPORTED, "no custom loader class")
             return []
 
-        # 2. Handle Standard Loaders via Subprocess (Safety Sandbox)
+        # 2. Handle Standard Loaders via direct import (frozen env 호환)
         for attempt in range(MAX_RETRIES):
             try:
-                env = os.environ.copy()
-                env["PYTHONIOENCODING"] = "utf-8"
-                
-                result = subprocess.run(
-                    ["python", "worker_loader.py", file_path],
-                    capture_output=True,
-                    text=True,
-                    encoding='utf-8',
-                    timeout=300, # 5min for heavy/complex files
-                    env=env
-                )
-                
-                if result.returncode == 0:
-                    output = result.stdout.strip()
-                    if output == "ENCRYPTED_FILE":
-                         with open(runtime_path("logs", "skipped_encrypted.txt"), "a", encoding="utf-8") as log_file:
-                            log_file.write(f"{file_path}\n")
-                         record_index_status(file_path, STATUS_ENCRYPTED, "worker reported encrypted file")
-                         return []
-                          
-                    if not output:
-                        if ext == ".pdf":
-                            docs = augment_pdf_docs_with_ocr([], file_path)
-                            if docs:
-                                record_index_status(file_path, STATUS_OK)
-                                return docs
-                        record_index_status(file_path, STATUS_EMPTY, "worker returned empty stdout")
-                        return []
-                     
-                    try:
-                        data = json.loads(output)
-                        if isinstance(data, dict) and data.get("__loader_error__"):
-                            record_index_status(file_path, data.get("category", STATUS_PARSE), data.get("detail", ""))
-                            return []
-                        docs = []
-                        for item in data:
-                            docs.append(Document(page_content=item['page_content'], metadata=item['metadata']))
-                        if ext == ".pdf":
-                            docs = augment_pdf_docs_with_ocr(docs, file_path)
-                        if docs:
-                            record_index_status(file_path, STATUS_OK)
-                        else:
-                            record_index_status(file_path, STATUS_NO_CHUNKS, "worker returned zero documents")
-                        return docs
-                    except json.JSONDecodeError as e:
-                        record_index_status(file_path, STATUS_PARSE, f"invalid worker JSON: {e}")
-                        return []
-                else:
-                    # Check if it's a network error (retry if so)
-                    err = result.stderr.strip()
-                    if "WinError" in err or "network" in err.lower() or "경로" in err:
-                        if attempt < MAX_RETRIES - 1:
-                            time.sleep(RETRY_DELAY)
-                            continue
-                        else:
-                            send_status_notification(f"⚠️ 네트워크 오류 ({MAX_RETRIES}회 재시도 실패)\n파일: {os.path.basename(file_path)}")
-                            record_index_status(file_path, STATUS_NETWORK, err)
-                            return []
-                    record_index_status(file_path, classify_error_text(err), err)
+                from worker_loader import load_file
+
+                data = load_file(file_path)
+
+                if isinstance(data, dict) and data.get("__loader_error__"):
+                    category = data.get("category", STATUS_PARSE)
+                    detail = data.get("detail", "")
+                    if category == "empty_or_encrypted":
+                        record_index_status(file_path, STATUS_ENCRYPTED, detail)
+                    else:
+                        record_index_status(file_path, category, detail)
                     return []
-                    
-            except subprocess.TimeoutExpired:
-                print(f"   [Timeout] Parsing took too long: {os.path.basename(file_path)}")
-                record_index_status(file_path, STATUS_TIMEOUT, "worker_loader timeout")
-                return []
+
+                docs = []
+                for item in data:
+                    docs.append(Document(page_content=item['page_content'], metadata=item['metadata']))
+                if ext == ".pdf":
+                    docs = augment_pdf_docs_with_ocr(docs, file_path)
+                if docs:
+                    record_index_status(file_path, STATUS_OK)
+                else:
+                    record_index_status(file_path, STATUS_NO_CHUNKS, "worker returned zero documents")
+                return docs
+
             except (OSError, IOError) as e:
                 # Network drive error - retry
                 if attempt < MAX_RETRIES - 1:
