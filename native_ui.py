@@ -21,6 +21,7 @@ from typing import Dict, List, Optional
 import requests
 from PySide6.QtCore import QObject, QThread, QTimer, Qt, Signal
 from PySide6.QtGui import QAction, QCloseEvent, QColor, QIcon, QPainter, QPixmap
+from PySide6.QtNetwork import QLocalServer, QLocalSocket
 from PySide6.QtWidgets import (
     QApplication,
     QHBoxLayout,
@@ -49,6 +50,7 @@ APP_TITLE = "OSL AI Assistant"
 FILE_URL_PREFIX = "file-oslref:///"
 OLLAMA_URL = "http://127.0.0.1:11434"
 _ollama_process: Optional[subprocess.Popen] = None
+_SINGLE_INSTANCE_SERVER = "OSL_AI_Assistant_SingleInstance"
 
 
 def _asset_path(filename: str) -> str:
@@ -546,6 +548,7 @@ class ChatWindow(QMainWindow):
         self.setWindowIcon(QIcon(_asset_path("app_icon.png")))
         self.resize(900, 720)
 
+        self._instance_server: Optional[QLocalServer] = None
         self.bg = BackgroundTaskManager(self)
         self.preload_worker: PreloadWorker | None = None
         self.chat_worker: Optional[ChatWorker] = None
@@ -752,7 +755,13 @@ class ChatWindow(QMainWindow):
 
     def _on_preload_done(self, ok: bool, message: str) -> None:
         if ok:
-            self._append_log("info", "모델 준비 완료. 질문을 입력하세요.")
+            intro = (
+                "OSL AI Assistant에 오신 것을 환영합니다.<br><br>"
+                "이 프로그램은 여러분의 문서를 분석하고 질문에 답변하는 AI 비서입니다. "
+                "백그라운드에서 학습이 진행될수록 더 정확한 답변을 제공합니다.<br><br>"
+                "<b>이 프로그램은 인터넷에 연결되지 않으며, 문서 정보가 외부로 반출되지 않습니다.</b>"
+            )
+            self._append_log("intro", intro)
         else:
             self._append_log("error", f"모델 준비 경고: {message}")
 
@@ -828,8 +837,9 @@ class ChatWindow(QMainWindow):
             "info": "#6b7280",
             "tool": "#6b7280",
             "error": "#dc2626",
+            "intro": "#ffffff",
         }.get(kind, "#6b7280")
-        text_html = _escape(text).replace("\n", "<br>")
+        text_html = _escape(text).replace("\n", "<br>") if kind != "intro" else text
         self.chat_view.append(
             f'<div style="margin:2px 0;color:{color};font-size:12px">· {text_html}</div>'
         )
@@ -863,15 +873,63 @@ class ChatWindow(QMainWindow):
         QApplication.quit()
 
 
+def _try_forward_to_existing_instance() -> bool:
+    """Try connecting to an existing instance. Returns True if forwarded."""
+    socket = QLocalSocket()
+    socket.connectToServer(_SINGLE_INSTANCE_SERVER)
+    if socket.waitForConnected(500):
+        socket.write(b"show")
+        socket.waitForBytesWritten(1000)
+        socket.disconnectFromServer()
+        return True
+    return False
+
+
+def _create_single_instance_server() -> Optional[QLocalServer]:
+    """Create a local server for single instance enforcement."""
+    # Remove stale server if previous crash left it behind
+    QLocalServer.removeServer(_SINGLE_INSTANCE_SERVER)
+    server = QLocalServer()
+    if not server.listen(_SINGLE_INSTANCE_SERVER):
+        return None
+    return server
+
+
 def main() -> int:
     os.environ.setdefault("PYTHONIOENCODING", "utf-8")
     app = QApplication(sys.argv)
     app.setQuitOnLastWindowClosed(False)
     app.setWindowIcon(QIcon(_asset_path("app_icon.png")))
+
+    # ── Single instance guard ──────────────────────────────
+    if _try_forward_to_existing_instance():
+        return 0
+
+    server = _create_single_instance_server()
+    if server is None:
+        return 0
+
     window = ChatWindow()
+    window._instance_server = server
+    server.newConnection.connect(lambda: _handle_new_connection(window))
+
     if not load_config().get("native_ui", {}).get("start_hidden", False):
         window.show()
     return app.exec()
+
+
+def _handle_new_connection(window: "ChatWindow") -> None:
+    """Bring the existing window to front when a second instance launches."""
+    server = window._instance_server
+    if server is None:
+        return
+    while server.hasPendingConnections():
+        socket = server.nextPendingConnection()
+        socket.waitForReadyRead(500)
+        data = socket.readAll().data()
+        if data == b"show":
+            window.show_normal()
+        socket.disconnectFromServer()
 
 
 if __name__ == "__main__":

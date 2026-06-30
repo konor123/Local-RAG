@@ -18,7 +18,7 @@ SHA256_SUFFIX = ".sha256.txt"
 
 HTTP_HEADERS = {
     "Accept": "application/vnd.github+json",
-    "User-Agent": "OSL-AI-Assistant-Updater/1.2.2",
+    "User-Agent": "OSL-AI-Assistant-Updater/1.2.3",
 }
 
 

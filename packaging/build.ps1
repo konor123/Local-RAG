@@ -63,7 +63,7 @@ if (-not (Test-Path $spec)) { Fail "missing $spec" }
 $venvPy = "py"
 & $venvPy -3.12 -m PyInstaller $spec
 if ($LASTEXITCODE -ne 0) { Fail "PyInstaller failed" }
-$builtExe = Join-Path (Join-Path $Dist "native_ui") "native_ui.exe"
+$builtExe = Join-Path (Join-Path $Dist "OSL_AI_Assistant") "OSL_AI_Assistant.exe"
 if (-not (Test-Path $builtExe)) { Fail ("PyInstaller output missing: {0}" -f $builtExe) }
 Ok ("built {0}" -f $builtExe)
 

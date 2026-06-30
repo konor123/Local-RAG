@@ -183,7 +183,7 @@ exe = EXE(
     a.scripts,
     [],
     exclude_binaries=True,
-    name="native_ui",
+    name="OSL_AI_Assistant",
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
@@ -204,5 +204,5 @@ coll = COLLECT(
     strip=False,
     upx=False,
     upx_exclude=[],
-    name="native_ui",
+    name="OSL_AI_Assistant",
 )

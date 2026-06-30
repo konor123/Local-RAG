@@ -8,10 +8,10 @@
 #define MyAppName "OSL AI Assistant"
 #define MyAppNameShort "OSL AI Assistant"
 #define MyAppNameShortNoSpace "OSL_AI_Assistant"
-#define MyAppVersion "1.2.2"
+#define MyAppVersion "1.2.3"
 #define MyAppPublisher "OSL ENG"
 #define MyAppURL "https://example.com"
-#define MyAppExeName "native_ui.exe"
+#define MyAppExeName "OSL_AI_Assistant.exe"
 #define MyOllamaExeName "ollama.exe"
 #define MyLibreOfficeMsi "LibreOffice.msi"
 #define MyLegacyAppNameShort "OSL RAG Internal"
@@ -52,7 +52,7 @@ Name: "startup";     Description: "Windows 시작 시 자동 실행";      Group
 
 [Files]
 ; PyInstaller single-folder distribution
-Source: "..\dist\native_ui\*"; DestDir: "{app}"; Flags: recursesubdirs ignoreversion
+Source: "..\dist\OSL_AI_Assistant\*"; DestDir: "{app}"; Flags: recursesubdirs ignoreversion
 
 ; Ollama binary
 Source: "deps\ollama\{#MyOllamaExeName}"; DestDir: "{app}\ollama"; Flags: ignoreversion
@@ -63,8 +63,7 @@ Source: "deps\ollama\lib\ollama\*"; DestDir: "{app}\ollama\lib\ollama"; Flags: r
 ; LibreOffice installer (run silently post-install)
 Source: "deps\{#MyLibreOfficeMsi}"; DestDir: "{tmp}"; Flags: ignoreversion deleteafterinstall
 
-; README / License
-Source: "..\README.md"; DestDir: "{app}"; Flags: ignoreversion isreadme
+; License
 Source: "..\LICENSE";   DestDir: "{app}"; Flags: ignoreversion onlyifdoesntexist
 
 [Dirs]
