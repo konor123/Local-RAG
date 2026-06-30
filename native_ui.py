@@ -473,7 +473,7 @@ class BackgroundTaskManager(QObject):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.cache_manager = CacheManager()
-        self.embedder = BackgroundEmbedder(sleep_between_files=5.0, batch_size=10)
+        self.embedder = BackgroundEmbedder(sleep_between_files=5.0, idle_sleep=60.0, batch_size=10)
         self._cache_timer: Optional[QTimer] = None
         self._refresh_thread: Optional[CacheRefreshWorker] = None
         self._running = False
@@ -485,7 +485,9 @@ class BackgroundTaskManager(QObject):
         self.refresh_cache()
         self._cache_timer = QTimer(self)
         self._cache_timer.timeout.connect(self.refresh_cache)
-        self._cache_timer.start(60 * 60 * 1000)
+        # Keep cache refresh active so newly mounted/updated network drives are
+        # discovered without user action.
+        self._cache_timer.start(5 * 60 * 1000)
         self._start_embed_if_idle()
 
     def stop(self) -> None:
@@ -514,9 +516,7 @@ class BackgroundTaskManager(QObject):
         if self.embedder.is_running():
             return
         files = self.cache_manager.get_embeddable_files()
-        if not files:
-            return
-        self.embedder.start(files, status_callback=None)
+        self.embedder.start(files, status_callback=None, file_provider=self.cache_manager.get_embeddable_files)
 
     def cache_text(self) -> str:
         if self.cache_manager.is_refreshing():
@@ -531,6 +531,8 @@ class BackgroundTaskManager(QObject):
         current = st.get("current_file", "")
         if self.embedder.is_running():
             current = current[:18]
+            if not current:
+                current = "모니터링 중"
             return f"⚙️ 임베딩: {current} ({processed:,} OK / {skip:,} skip / {error:,} err)"
         total = st.get("total_processed", 0)
         return f"⚙️ 임베딩: 대기 (누적 {total:,} 처리)"

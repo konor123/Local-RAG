@@ -85,11 +85,13 @@ class BackgroundEmbedder:
     def __init__(
         self,
         sleep_between_files: float = 5.0,  # 파일 간 대기 시간 (초)
+        idle_sleep: float = 60.0,  # 처리할 파일이 없을 때 재확인 대기 시간
         batch_size: int = 10,  # 배치 크기
         chunk_size: int = 500,  # 텍스트 청크 크기
         chunk_overlap: int = 50  # 청크 오버랩
     ):
         self.sleep_between_files = sleep_between_files
+        self.idle_sleep = idle_sleep
         self.batch_size = batch_size
         self.chunk_size = chunk_size
         self.chunk_overlap = chunk_overlap
@@ -108,6 +110,8 @@ class BackgroundEmbedder:
         self._current_file = ""
         self._last_error = ""
         self._status_callback: Optional[Callable] = None
+        self._file_provider: Optional[Callable[[], List[str]]] = None
+        self._limit: Optional[int] = None
         self._extension_stats = defaultdict(Counter)
         
         # 처리된 파일 목록 로드
@@ -308,51 +312,82 @@ class BackgroundEmbedder:
             return False
     
     def _embedding_loop(self, files: List[str]) -> None:
-        """임베딩 메인 루프"""
-        _log.info(f"=== Embedding loop START: {len(files)} files ===")
-        print(f"[Embedder] Starting embedding loop for {len(files)} files")
-        
-        # 모델 및 벡터스토어 로드
-        if not self._lazy_load_vectorstore():
-            _log.error("VectorStore load FAILED — aborting loop")
+        """임베딩 메인 루프.
+
+        When a file provider is supplied, keep the worker alive and periodically
+        re-check the latest cache so network-drive files discovered later are
+        embedded without requiring a manual restart.
+        """
+        _log.info(f"=== Embedding loop START: {len(files)} initial files ===")
+        print(f"[Embedder] Starting embedding loop for {len(files)} initial files")
+
+        try:
+            while not self._should_stop:
+                source_files = files
+                if self._file_provider is not None:
+                    try:
+                        source_files = self._file_provider() or []
+                    except Exception as provider_error:
+                        self._last_error = f"File provider failed: {provider_error}"
+                        _log.warning(self._last_error)
+                        source_files = []
+
+                new_files = sorted(
+                    [f for f in source_files if f not in self._processed_files],
+                    key=_priority,
+                )
+                if self._limit:
+                    new_files = new_files[: self._limit]
+
+                if not new_files:
+                    self._current_file = "모니터링 중"
+                    if self._status_callback:
+                        self._status_callback(self._processed_count, len(source_files), self._current_file, False)
+                    if self._file_provider is None:
+                        break
+                    _log.debug(f"No new files; rechecking in {self.idle_sleep}s")
+                    time.sleep(self.idle_sleep)
+                    continue
+
+                # 모델 및 벡터스토어 로드 (처리할 파일이 있을 때만)
+                if not self._lazy_load_vectorstore():
+                    _log.error("VectorStore load FAILED — retrying after idle sleep")
+                    time.sleep(self.idle_sleep)
+                    continue
+                _log.info("VectorStore loaded OK")
+
+                for i, filepath in enumerate(new_files):
+                    if self._should_stop:
+                        _log.info("Stop requested, exiting loop")
+                        break
+
+                    if filepath in self._processed_files:
+                        continue
+
+                    success = self._process_file(filepath)
+
+                    if success:
+                        self._save_processed_file(filepath)
+
+                    if self._status_callback:
+                        self._status_callback(self._processed_count, len(new_files), self._current_file, success)
+
+                    checked = i + 1
+                    if checked % 100 == 0:
+                        _log.info(f"Progress: checked={checked}/{len(new_files)} | ok={self._processed_count} | skip={self._skip_count} | err={self._error_count}")
+
+                    if success and not self._should_stop:
+                        time.sleep(self.sleep_between_files)
+
+                if self._file_provider is None:
+                    break
+        finally:
             self._is_running = False
-            return
-        _log.info("VectorStore loaded OK")
-        
-        for i, filepath in enumerate(files):
-            if self._should_stop:
-                _log.info("Stop requested, exiting loop")
-                break
-            
-            # 이미 처리된 파일 건너뛰기
-            if filepath in self._processed_files:
-                continue
-            
-            # 파일 처리
-            success = self._process_file(filepath)
-            
-            if success:
-                self._save_processed_file(filepath)
-            
-            # 콜백 호출
-            if self._status_callback:
-                self._status_callback(self._processed_count, len(files), self._current_file, success)
-            
-            # 진행 상황 로그 (100개마다)
-            checked = i + 1
-            if checked % 100 == 0:
-                _log.info(f"Progress: checked={checked}/{len(files)} | ok={self._processed_count} | skip={self._skip_count} | err={self._error_count}")
-            
-            # 저자원 모드: 성공한 파일 후에만 대기 (스킵은 빠르게 넘김)
-            if success and not self._should_stop:
-                time.sleep(self.sleep_between_files)
-        
-        self._is_running = False
-        self._current_file = ""
-        _log.info(f"=== Embedding loop END: ok={self._processed_count} | skip={self._skip_count} | err={self._error_count} ===")
-        print(f"[Embedder] Embedding loop finished. Processed: {self._processed_count}")
+            self._current_file = ""
+            _log.info(f"=== Embedding loop END: ok={self._processed_count} | skip={self._skip_count} | err={self._error_count} ===")
+            print(f"[Embedder] Embedding loop stopped. Processed: {self._processed_count}")
     
-    def start(self, files: List[str], status_callback: Callable = None, limit: int = None) -> bool:
+    def start(self, files: List[str], status_callback: Callable = None, limit: int = None, file_provider: Callable[[], List[str]] = None) -> bool:
         """
         백그라운드 임베딩 시작
         
@@ -371,6 +406,8 @@ class BackgroundEmbedder:
             self._is_running = True
             self._should_stop = False
             self._status_callback = status_callback
+            self._file_provider = file_provider
+            self._limit = limit
         
         # 새 파일만 필터링
         new_files = sorted([f for f in files if f not in self._processed_files], key=_priority)
@@ -378,7 +415,7 @@ class BackgroundEmbedder:
             new_files = new_files[:limit]
         print(f"[Embedder] {len(new_files)} new files to process (skipping {len(files) - len(new_files)} processed)")
         
-        if not new_files:
+        if not new_files and file_provider is None:
             self._is_running = False
             return False
         

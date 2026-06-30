@@ -581,7 +581,7 @@ def apply_sample_selection(files: List[str]) -> List[str]:
 tracker_lock = threading.Lock()
 last_save_time = time.time()
 
-def get_files_from_drives(drives: List[str]) -> List[str]:
+def get_files_from_drives(drives: List[str] | None = None) -> List[str]:
     # Cache file to avoid repeated scanning
     CACHE_FILE = runtime_path("file_list_cache.json")
     
@@ -605,6 +605,7 @@ def get_files_from_drives(drives: List[str]) -> List[str]:
     # biased by raw os.walk order.
     target_count = float('inf')
     
+    drives = drives or get_search_roots()
     exclude_names = get_exclude_dir_names()
     for drive in drives:
         if len(all_files) >= target_count:
@@ -911,7 +912,7 @@ def ingest_data():
              existing_sources = chroma_sources
     
     # 1. Gather files
-    files = get_files_from_drives(DRIVES)
+    files = get_files_from_drives(get_search_roots())
     print(f"Found {len(files)} potential files from cache/scan.")
 
     seen_candidates = set()

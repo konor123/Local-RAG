@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import os
+import re
+import subprocess
 from pathlib import Path
 from typing import Iterable, List
 
@@ -17,6 +19,36 @@ def _normalize_root(path: str) -> str:
     return root + "/"
 
 
+def _net_use_drives() -> List[str]:
+    """Return mapped Windows network drive roots reported by ``net use``.
+
+    ``os.listdrives()`` is usually enough, but mapped network drives can be
+    missed depending on Windows session/elevation state. ``net use`` is the
+    most direct source for user-mapped network drive letters, and it supports
+    arbitrary letters rather than the historical X/Y/Z assumptions.
+    """
+    if os.name != "nt":
+        return []
+    try:
+        result = subprocess.run(
+            ["net", "use"],
+            capture_output=True,
+            text=True,
+            encoding="mbcs",
+            errors="replace",
+            timeout=5,
+            check=False,
+        )
+    except Exception:
+        return []
+    drives: List[str] = []
+    for line in (result.stdout or "").splitlines():
+        match = re.search(r"\b([A-Z]):\s+\\\\", line, re.IGNORECASE)
+        if match:
+            drives.append(f"{match.group(1).upper()}:/")
+    return drives
+
+
 def _windows_connected_drives() -> List[str]:
     drives: List[str] = []
     if hasattr(os, "listdrives"):
@@ -29,7 +61,8 @@ def _windows_connected_drives() -> List[str]:
             root = f"{letter}:/"
             if os.path.exists(root):
                 drives.append(root)
-    return [_normalize_root(d) for d in drives if os.path.exists(d)]
+    drives.extend(_net_use_drives())
+    return sorted(dict.fromkeys(_normalize_root(d) for d in drives))
 
 
 def get_search_roots() -> List[str]:
@@ -45,8 +78,8 @@ def get_search_roots() -> List[str]:
     else:
         roots = _windows_connected_drives()
     if not roots:
-        roots = [d for d in DEFAULT_DRIVES if os.path.exists(d)]
-    return sorted(dict.fromkeys(_normalize_root(r) for r in roots if os.path.exists(r)))
+        roots = DEFAULT_DRIVES
+    return sorted(dict.fromkeys(_normalize_root(r) for r in roots))
 
 
 def get_exclude_dir_names() -> set[str]:

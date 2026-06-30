@@ -10,7 +10,8 @@ from pathlib import Path
 from drive_manager import filter_walk_dirs, get_exclude_dir_names, get_search_roots
 from runtime_paths import runtime_path
 
-# Search roots: connected local/network drives by default.
+# Search roots are resolved at call time so late-mounted network drives are not
+# missed. Keep this only for backward compatibility with external imports.
 DRIVES = get_search_roots()
 MAX_RESULTS = 100
 MAX_FILE_SIZE = 100 * 1024  # 100KB max for file reading
@@ -287,7 +288,7 @@ def search_files(pattern: str, drives: Optional[List[str]] = None, use_cache: bo
     
     if drives is None:
         drives = get_search_roots()
-    drives = drives or DRIVES
+    drives = drives or get_search_roots()
     
     results = []
     
@@ -509,7 +510,8 @@ def grep_content(keyword: str, path: str = None, drives: Optional[List[str]] = N
         Dict with matching files and snippets
     """
     if drives is None:
-        drives = DRIVES
+        drives = get_search_roots()
+    drives = drives or get_search_roots()
     
     results = []
     
