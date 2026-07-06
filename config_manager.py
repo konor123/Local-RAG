@@ -66,6 +66,14 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "file_search_sufficient_count": 1,
         "max_jit_files": 5,
     },
+    "embedding": {
+        "enabled": True,
+        "max_load_failures": 3,
+        "retry_backoff_seconds": [60, 300, 900, 3600],
+        "max_metadata_mb_for_eager_load": 512,
+        "max_index_mb_for_eager_load": 2048,
+        "max_file_size_mb": 200,
+    },
     "vector": {
         "backend": "turbovec",
         "index_dir": "%LOCALAPPDATA%/OSL AI Assistant/turbovec_index",

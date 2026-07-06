@@ -13,6 +13,7 @@ import logging
 from typing import List, Set, Optional, Callable
 from datetime import datetime
 from collections import defaultdict, Counter
+from config_manager import load_config
 from runtime_paths import runtime_path
 
 # 환경 변수 설정 (저자원 모드)
@@ -27,7 +28,7 @@ LOG_FILE = os.environ.get("EMBED_LOG_PATH", runtime_path("logs", "embed_log.txt"
 # 임베딩 가능한 확장자
 EMBEDDABLE_EXTENSIONS = {
     ".pdf", ".docx", ".doc", ".xlsx", ".xls",
-    ".pptx", ".ppt", ".hwp", ".hwpx", ".txt", ".html", ".htm"
+    ".pptx", ".ppt", ".dwg", ".hwp", ".hwpx", ".txt", ".html", ".htm"
 }
 
 PRIORITY_EXTS = {
@@ -62,6 +63,33 @@ def _classify_error_text(text: str) -> str:
 
 def _is_temporary_office_file(file_path: str) -> bool:
     return os.path.basename(file_path).startswith("~$")
+
+
+def _embedding_config() -> dict:
+    return load_config().get("embedding", {})
+
+
+def _positive_int(value, default: int) -> int:
+    try:
+        result = int(value)
+    except (TypeError, ValueError):
+        result = default
+    return result if result > 0 else default
+
+
+def _backoff_seconds(config: dict) -> List[int]:
+    values = config.get("retry_backoff_seconds", [60, 300, 900, 3600])
+    if not isinstance(values, list) or not values:
+        return [60, 300, 900, 3600]
+    parsed = []
+    for value in values:
+        try:
+            seconds = int(value)
+        except (TypeError, ValueError):
+            continue
+        if seconds > 0:
+            parsed.append(seconds)
+    return parsed or [60, 300, 900, 3600]
 
 # 파일 로거 설정
 def _get_logger():
@@ -101,7 +129,7 @@ class BackgroundEmbedder:
         self._is_running = False
         self._should_stop = False
         self._thread: Optional[threading.Thread] = None
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
         
         # 상태 추적
         self._processed_count = 0
@@ -113,6 +141,15 @@ class BackgroundEmbedder:
         self._file_provider: Optional[Callable[[], List[str]]] = None
         self._limit: Optional[int] = None
         self._extension_stats = defaultdict(Counter)
+        self._config = _embedding_config()
+        self._embedding_enabled = bool(self._config.get("enabled", True))
+        self._max_load_failures = _positive_int(self._config.get("max_load_failures"), 3)
+        self._retry_backoff_seconds = _backoff_seconds(self._config)
+        self._max_file_size_bytes = _positive_int(self._config.get("max_file_size_mb"), 200) * 1024 * 1024
+        self._consecutive_load_failures = 0
+        self._backoff_until = 0.0
+        self._embedding_disabled_for_session = not self._embedding_enabled
+        self._last_vectorstore_error = ""
         
         # 처리된 파일 목록 로드
         self._processed_files: Set[str] = self._load_processed_files()
@@ -141,6 +178,52 @@ class BackgroundEmbedder:
             self._processed_files.add(filepath)
         except Exception as e:
             print(f"[Embedder] Error saving processed file: {e}")
+
+    def _is_processable_file(self, filepath: str) -> bool:
+        ext = os.path.splitext(filepath)[1].lower()
+        if ext not in EMBEDDABLE_EXTENSIONS:
+            return False
+        if _is_temporary_office_file(filepath):
+            return False
+        try:
+            if not os.path.exists(filepath):
+                return False
+            if os.path.getsize(filepath) > self._max_file_size_bytes:
+                return False
+        except OSError:
+            return False
+        return True
+
+    def _filter_processable_files(self, files: List[str]) -> List[str]:
+        return [f for f in files if self._is_processable_file(f)]
+
+    def _current_backoff_seconds(self) -> int:
+        index = max(0, min(self._consecutive_load_failures - 1, len(self._retry_backoff_seconds) - 1))
+        return self._retry_backoff_seconds[index]
+
+    def _register_vectorstore_load_success(self) -> None:
+        with self._lock:
+            self._consecutive_load_failures = 0
+            self._backoff_until = 0.0
+            self._last_vectorstore_error = ""
+
+    def _register_vectorstore_load_failure(self, error: str) -> int:
+        with self._lock:
+            self._consecutive_load_failures += 1
+            self._last_vectorstore_error = error
+            if self._consecutive_load_failures >= self._max_load_failures:
+                self._embedding_disabled_for_session = True
+                self._backoff_until = 0.0
+                return 0
+            delay = self._current_backoff_seconds()
+            self._backoff_until = time.time() + delay
+            return delay
+
+    def _vectorstore_retry_delay(self) -> int:
+        if self._embedding_disabled_for_session:
+            return 0
+        remaining = int(max(0, self._backoff_until - time.time()))
+        return remaining
     
     def _lazy_load_model(self) -> bool:
         """모델 지연 로딩"""
@@ -167,16 +250,26 @@ class BackgroundEmbedder:
         """벡터스토어 인덱스 지연 로딩"""
         if self._vectorstore is not None:
             return True
+        if self._embedding_disabled_for_session:
+            self._last_error = "Embedding disabled for this session after repeated VectorStore load failures"
+            return False
+        retry_delay = self._vectorstore_retry_delay()
+        if retry_delay > 0:
+            self._last_error = f"VectorStore load is in backoff for {retry_delay}s: {self._last_vectorstore_error}"
+            return False
         
         try:
             from faiss_store import load_index, get_backend_name
             
             load_index()
             self._vectorstore = True  # 이름은 _vectorstore 유지 (호환)
+            self._register_vectorstore_load_success()
             print(f"[Embedder] VectorStore index loaded successfully ({get_backend_name()})")
             return True
         except Exception as e:
-            self._last_error = f"VectorStore load failed: {e}"
+            error = str(e)
+            self._last_error = f"VectorStore load failed: {error}"
+            self._register_vectorstore_load_failure(error)
             print(f"[Embedder] {self._last_error}")
             return False
     
@@ -339,24 +432,30 @@ class BackgroundEmbedder:
                 if self._limit:
                     new_files = new_files[: self._limit]
 
-                if not new_files:
+                processable_files = self._filter_processable_files(new_files)
+
+                if not processable_files:
                     self._current_file = "모니터링 중"
                     if self._status_callback:
                         self._status_callback(self._processed_count, len(source_files), self._current_file, False)
                     if self._file_provider is None:
                         break
-                    _log.debug(f"No new files; rechecking in {self.idle_sleep}s")
+                    _log.debug(f"No processable new files; rechecking in {self.idle_sleep}s")
                     time.sleep(self.idle_sleep)
                     continue
 
                 # 모델 및 벡터스토어 로드 (처리할 파일이 있을 때만)
                 if not self._lazy_load_vectorstore():
-                    _log.error("VectorStore load FAILED — retrying after idle sleep")
-                    time.sleep(self.idle_sleep)
+                    if self._embedding_disabled_for_session:
+                        _log.error(f"VectorStore load FAILED: {self._last_error} — embedding disabled for this session")
+                        break
+                    retry_delay = self._vectorstore_retry_delay() or self.idle_sleep
+                    _log.error(f"VectorStore load FAILED: {self._last_error} — retrying after {retry_delay}s")
+                    time.sleep(retry_delay)
                     continue
                 _log.info("VectorStore loaded OK")
 
-                for i, filepath in enumerate(new_files):
+                for i, filepath in enumerate(processable_files):
                     if self._should_stop:
                         _log.info("Stop requested, exiting loop")
                         break
@@ -370,11 +469,11 @@ class BackgroundEmbedder:
                         self._save_processed_file(filepath)
 
                     if self._status_callback:
-                        self._status_callback(self._processed_count, len(new_files), self._current_file, success)
+                        self._status_callback(self._processed_count, len(processable_files), self._current_file, success)
 
                     checked = i + 1
                     if checked % 100 == 0:
-                        _log.info(f"Progress: checked={checked}/{len(new_files)} | ok={self._processed_count} | skip={self._skip_count} | err={self._error_count}")
+                        _log.info(f"Progress: checked={checked}/{len(processable_files)} | ok={self._processed_count} | skip={self._skip_count} | err={self._error_count}")
 
                     if success and not self._should_stop:
                         time.sleep(self.sleep_between_files)
@@ -401,6 +500,8 @@ class BackgroundEmbedder:
         """
         with self._lock:
             if self._is_running:
+                return False
+            if self._embedding_disabled_for_session:
                 return False
             
             self._is_running = True
@@ -442,6 +543,10 @@ class BackgroundEmbedder:
             "error_count": self._error_count,
             "current_file": self._current_file,
             "last_error": self._last_error,
+            "consecutive_load_failures": self._consecutive_load_failures,
+            "backoff_until": self._backoff_until,
+            "embedding_disabled_for_session": self._embedding_disabled_for_session,
+            "last_vectorstore_error": self._last_vectorstore_error,
             "total_processed": len(self._processed_files),
             "extension_stats": extension_stats
         }
@@ -453,6 +558,14 @@ class BackgroundEmbedder:
         """
         with self._lock:
             print(f"[Embedder] JIT Processing Request: {filepath}")
+            if self._embedding_disabled_for_session:
+                self._last_error = "Embedding disabled for this session after repeated VectorStore load failures"
+                print(f"[Embedder] {self._last_error}")
+                return False
+            if not self._is_processable_file(filepath):
+                self._last_error = f"JIT file is not processable: {filepath}"
+                print(f"[Embedder] {self._last_error}")
+                return False
             
             # 모델/DB 로드 확인
             if not self._lazy_load_vectorstore():

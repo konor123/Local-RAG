@@ -10,11 +10,11 @@ from __future__ import annotations
 import json
 import os
 import threading
+import time
 from abc import ABC, abstractmethod
 from typing import Dict, List
 
-import faiss
-import numpy as np
+from config_manager import load_config
 from runtime_paths import runtime_path
 
 
@@ -30,13 +30,76 @@ TURBOVEC_BIT_WIDTH = int(os.environ.get("TURBOVEC_BIT_WIDTH", "4") or 4)
 _backend_lock = threading.RLock()
 _backend = None
 _fallback_active = False
+_backend_load_failed_until = 0.0
+_backend_last_error = ""
+
+
+def _embedding_config() -> dict:
+    return load_config().get("embedding", {})
+
+
+def _mb_to_bytes(value, default_mb: int) -> int:
+    try:
+        mb = int(value)
+    except (TypeError, ValueError):
+        mb = default_mb
+    if mb <= 0:
+        return 0
+    return mb * 1024 * 1024
+
+
+def _format_mb(size_bytes: int) -> str:
+    return f"{size_bytes / (1024 * 1024):.1f}MB"
+
+
+def _guard_existing_store_size(index_file: str, meta_file: str, backend_name: str) -> None:
+    """Refuse eager loading of known-oversized persisted vector stores.
+
+    This check intentionally runs before faiss.read_index()/IdMapIndex.load()
+    and before parsing metadata.jsonl, so a bad runtime state cannot trigger a
+    repeated memory spike.
+    """
+    cfg = _embedding_config()
+    max_index = _mb_to_bytes(cfg.get("max_index_mb_for_eager_load"), 2048)
+    max_meta = _mb_to_bytes(cfg.get("max_metadata_mb_for_eager_load"), 512)
+
+    if max_index and os.path.exists(index_file):
+        index_size = os.path.getsize(index_file)
+        if index_size > max_index:
+            raise RuntimeError(
+                f"{backend_name} index file is too large for eager load: "
+                f"{_format_mb(index_size)} > {_format_mb(max_index)} ({index_file})"
+            )
+
+    if max_meta and os.path.exists(meta_file):
+        meta_size = os.path.getsize(meta_file)
+        if meta_size > max_meta:
+            raise RuntimeError(
+                f"{backend_name} metadata file is too large for eager load: "
+                f"{_format_mb(meta_size)} > {_format_mb(max_meta)} ({meta_file})"
+            )
+
+
+def _backend_failure_cooldown_seconds() -> int:
+    cfg = _embedding_config()
+    backoffs = cfg.get("retry_backoff_seconds", [60])
+    if isinstance(backoffs, list) and backoffs:
+        try:
+            return max(1, int(backoffs[0]))
+        except (TypeError, ValueError):
+            return 60
+    return 60
 
 
 def _normalize_vectors(vectors: List[list]) -> np.ndarray:
+    import numpy as np
+
     arr = np.array(vectors, dtype=np.float32)
     if arr.ndim == 1:
         arr = arr.reshape(1, -1)
-    faiss.normalize_L2(arr)
+    norms = np.linalg.norm(arr, axis=1, keepdims=True)
+    norms[norms == 0] = 1.0
+    arr = arr / norms
     return arr
 
 
@@ -103,6 +166,9 @@ class FaissBackend(VectorBackend):
             meta_exists = os.path.exists(self.meta_file)
             if index_exists and meta_exists:
                 try:
+                    _guard_existing_store_size(self.index_file, self.meta_file, self.name)
+                    import faiss
+
                     self._index = faiss.read_index(self.index_file)
                     self._metadata = []
                     with open(self.meta_file, "r", encoding="utf-8") as f:
@@ -120,6 +186,8 @@ class FaissBackend(VectorBackend):
                 raise RuntimeError(
                     f"FAISS index is incomplete: index_file_exists={index_exists}, metadata_file_exists={meta_exists}"
                 )
+            import faiss
+
             self._index = faiss.IndexFlatIP(VECTOR_DIM)
             self._metadata = []
             print(f"[VectorStore:faiss] Created new index (dim={VECTOR_DIM})")
@@ -130,6 +198,8 @@ class FaissBackend(VectorBackend):
             if self._index is None:
                 return
             self._ensure_dir()
+            import faiss
+
             faiss.write_index(self._index, self.index_file)
             _atomic_write_jsonl(self.meta_file, self._metadata)
             self._dirty = False
@@ -216,6 +286,7 @@ class TurboVecBackend(VectorBackend):
             meta_exists = os.path.exists(self.meta_file)
             if index_exists and meta_exists:
                 try:
+                    _guard_existing_store_size(self.index_file, self.meta_file, self.name)
                     self._index = IdMapIndex.load(self.index_file)
                     self._metadata_by_id = {}
                     max_id = 0
@@ -289,6 +360,8 @@ class TurboVecBackend(VectorBackend):
         vec_array = _normalize_vectors(vectors)
         with self._lock:
             start_id = self._next_id
+            import numpy as np
+
             ids = np.arange(start_id, start_id + len(vectors), dtype=np.uint64)
             self._index.add_with_ids(vec_array, ids)
             for row_id, meta in zip(ids.tolist(), metas):
@@ -336,22 +409,43 @@ def _make_backend(name: str) -> VectorBackend:
 
 
 def _get_backend() -> VectorBackend:
-    global _backend, _fallback_active
+    global _backend, _fallback_active, _backend_load_failed_until, _backend_last_error
     with _backend_lock:
         if _backend is not None:
             return _backend
+        now = time.time()
+        if _backend_load_failed_until > now:
+            remaining = int(_backend_load_failed_until - now)
+            raise RuntimeError(
+                f"VectorStore load suppressed for {remaining}s after previous failure: {_backend_last_error}"
+            )
         try:
             _backend = _make_backend(VECTOR_BACKEND)
             _backend.load_index()
             _fallback_active = False
+            _backend_load_failed_until = 0.0
+            _backend_last_error = ""
         except Exception as e:
+            _backend = None
+            _fallback_active = False
+            _backend_last_error = str(e)
+            _backend_load_failed_until = time.time() + _backend_failure_cooldown_seconds()
             print(f"[VectorStore:{VECTOR_BACKEND}] Load failed: {e}")
             if not VECTOR_BACKEND_FALLBACK or VECTOR_BACKEND_STRICT:
                 raise
-            _backend = _make_backend(VECTOR_BACKEND_FALLBACK)
-            _backend.load_index()
-            _fallback_active = True
-            print(f"[VectorStore] Read fallback active: {VECTOR_BACKEND} -> {VECTOR_BACKEND_FALLBACK}")
+            try:
+                _backend = _make_backend(VECTOR_BACKEND_FALLBACK)
+                _backend.load_index()
+                _fallback_active = True
+                _backend_load_failed_until = 0.0
+                _backend_last_error = ""
+                print(f"[VectorStore] Read fallback active: {VECTOR_BACKEND} -> {VECTOR_BACKEND_FALLBACK}")
+            except Exception as fallback_error:
+                _backend = None
+                _fallback_active = False
+                _backend_last_error = str(fallback_error)
+                _backend_load_failed_until = time.time() + _backend_failure_cooldown_seconds()
+                raise
         return _backend
 
 
@@ -389,6 +483,8 @@ def get_backend_name() -> str:
 
 
 if __name__ == "__main__":
+    import numpy as np
+
     print(f"=== Vector Store Test ({VECTOR_BACKEND}) ===")
     test_docs = [
         {
