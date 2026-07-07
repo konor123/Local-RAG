@@ -20,5 +20,5 @@
 
 ### 빌드 정보
 
-- installer size: (빌드 후 갱신)
-- SHA256: (빌드 후 갱신)
+- installer size: 888.8 MB
+- SHA256: 6C7F9802616619B3770091F7DB817678442F87DE1B1A5C1FF848AF44D65A7690
