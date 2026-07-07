@@ -17,4 +17,4 @@
 - `python -m unittest tests.test_resource_guardrails` 통과 (6/6)
 - reviewer 재검토: 블로커 없음, ship 가능
 - installer size: 888.8 MB
-- SHA256: (빌드 후 갱신)
+- SHA256: 75ECFFBDE636CA5E0EFD9818EBDAC50F8F56B4C22D5FC25FFB81ED8217276376
