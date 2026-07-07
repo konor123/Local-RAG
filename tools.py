@@ -722,6 +722,16 @@ def search_content(query: str, k: int = 4) -> Dict:
     except Exception as e:
         return {"error": f"RAG 검색 오류: {str(e)}"}
 
+
+def search_hybrid(query: str, k: int = 5) -> Dict:
+    """Filename/path search and vector content search fused with RRF."""
+    try:
+        from hybrid_search import hybrid_search
+
+        return hybrid_search(query, k=k)
+    except Exception as e:
+        return {"error": f"하이브리드 검색 오류: {str(e)}", "query": query, "count": 0, "results": [], "sources": []}
+
 # Tool definitions for LLM Function Calling
 TOOL_DEFINITIONS = [
     {
@@ -864,6 +874,27 @@ TOOL_DEFINITIONS = [
                 "required": ["query"]
             }
         }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "search_hybrid",
+            "description": "파일명 검색과 RAG 내용 검색을 RRF로 병합해 관련 문서를 찾습니다.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "검색할 자연어 쿼리"
+                    },
+                    "k": {
+                        "type": "integer",
+                        "description": "반환할 문서 수 (기본값: 5)"
+                    }
+                },
+                "required": ["query"]
+            }
+        }
     }
 ]
 
@@ -877,7 +908,8 @@ def execute_tool(tool_name: str, arguments: dict) -> Dict:
         "list_directory": list_directory,
         "save_memory": save_memory,
         "recall_memory": recall_memory,
-        "search_content": search_content
+        "search_content": search_content,
+        "search_hybrid": search_hybrid
     }
     
     if tool_name not in tools:

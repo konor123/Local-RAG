@@ -50,6 +50,7 @@ CONTENT_SEARCH_PATTERNS = [
 # 하이브리드 의도 패턴 (파일 찾기 + 내용 읽기)
 HYBRID_PATTERNS = [
     r"(파일|문서).*(내용|읽|확인|열)",
+    r"(file|document|catalog).*(내용|읽|확인|열)",
     r"(내용|안에).*(뭐|무엇).*있",
     r"(찾|검색).*(읽|확인|요약)",
     r"(카탈로그|견적서|자료).*(보|확인|내용)",
@@ -80,7 +81,7 @@ def classify_query(query: str) -> QueryIntent:
     
     # 하이브리드 패턴 체크 (먼저 검사, 높은 우선순위)
     for pattern in HYBRID_PATTERNS:
-        if re.search(pattern, query):
+        if re.search(pattern, query, re.IGNORECASE):
             scores["hybrid"] += 3
     
     # 파일 검색 패턴 체크

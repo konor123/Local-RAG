@@ -18,11 +18,12 @@ except ImportError:  # Backward compatibility until requirements are installed.
 from langchain_core.messages import SystemMessage, HumanMessage
 
 from rag_engine import LLM_MODEL, OLLAMA_BASE_URL, LLM_NUM_CTX, LLM_NUM_PREDICT, LLM_REQUEST_TIMEOUT
-from tools import search_files, search_content
+from tools import search_files, search_content, search_hybrid
 from background_embedder import BackgroundEmbedder
 from conversation_logger import conversation_logger
 from ai_providers.provider_manager import get_provider
 from config_manager import load_config
+from query_router import classify_query
 
 # --- Configuration ---
 MAX_WORKERS = 3  # 병렬 실행 스레드 수
@@ -71,7 +72,11 @@ def get_unified_response(
     # 1. Query Planning (계획 수립)
     yield {"type": "thinking", "content": "🤔 질문 분석 및 검색 계획 수립 중..."}
     
-    plan = _plan_query(question, chat_history)
+    intent = classify_query(question)
+    if intent == "hybrid":
+        plan = {"sub_queries": [{"type": "hybrid", "query": question, "reason": "명확한 통합 검색 의도"}]}
+    else:
+        plan = _plan_query(question, chat_history)
     
     if not plan or not plan.get("sub_queries"):
         yield {"type": "thinking", "content": "⚠️ 계획 수립 실패, 기본 검색으로 전환합니다."}
@@ -95,6 +100,7 @@ def get_unified_response(
     
     file_queries = [sq for sq in plan["sub_queries"] if sq.get("type") == "file"]
     content_queries = [sq for sq in plan["sub_queries"] if sq.get("type") == "content"]
+    hybrid_queries = [sq for sq in plan["sub_queries"] if sq.get("type") == "hybrid"]
 
     def run_query(sq: Dict, allow_jit: bool = True) -> Dict:
         final_data = {}
@@ -111,7 +117,12 @@ def get_unified_response(
 
     file_count = sum(item["data"].get("result", {}).get("count", 0) for item in execution_results if item["data"].get("type") == "file")
     sufficient_count = int(_search_config().get("file_search_sufficient_count", 1))
-    if file_count >= sufficient_count:
+    if hybrid_queries:
+        yield {"type": "thinking", "content": "🔄 하이브리드 검색을 실행합니다..."}
+        for sq in hybrid_queries:
+            data = yield from run_query(sq)
+            execution_results.append({"sub_query": sq, "data": data})
+    elif file_count >= sufficient_count:
         yield {"type": "thinking", "content": f"✅ 캐시된 파일명/경로 검색에서 {file_count}개 발견. 임베딩 검색은 생략합니다."}
     else:
         yield {"type": "thinking", "content": "📚 파일명 결과가 부족하여 임베딩/내용 검색을 실행합니다..."}
@@ -280,6 +291,13 @@ def _execute_sub_query_streaming(sub_query: Dict, allow_jit: bool = True) -> Gen
             yield ({"type": "thinking", "content": f"✅ [Content] 완료: {count}개 문서 발견"}, None)
             
             data = {"type": "content", "result": result}
+
+        elif q_type == 'hybrid':
+            yield ({"type": "thinking", "content": f"🔄 [Hybrid] '{query}' 검색 중..."}, None)
+            result = search_hybrid(query, k=5)
+            count = result.get("count", 0)
+            yield ({"type": "thinking", "content": f"✅ [Hybrid] 완료: {count}개 결과 병합"}, None)
+            data = {"type": "hybrid", "result": result}
             
     except Exception as e:
         yield ({"type": "error", "content": f"Sub-query Error: {e}"}, None)
@@ -348,13 +366,14 @@ def _synthesize_answer(question: str, execution_results: List[Dict], chat_histor
                 for r in res.get("results", [])[:5]:
                     source_info.append({"source": r.get("path"), "type": "file"})
 
-        elif data.get("type") == "content":
+        elif data.get("type") in ("content", "hybrid"):
             count = res.get("count", 0)
             content_hit_count += count
             if count > 0:
                 docs = [f"--- 문서: {os.path.basename(d.get('source', 'Unknown'))} ---\n{d.get('content')[:1000]}" 
                         for d in res.get("results", [])[:4]]
-                context_parts.append(f"=== 내용 검색 결과 (Query: {sq['query']}) ===\n" + "\n\n".join(docs))
+                label = "하이브리드 검색 결과" if data.get("type") == "hybrid" else "내용 검색 결과"
+                context_parts.append(f"=== {label} (Query: {sq['query']}) ===\n" + "\n\n".join(docs))
                 
                 # 소스 메타데이터
                 for d in res.get("results", [])[:4]:
