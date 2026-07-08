@@ -62,6 +62,23 @@ class EvidenceSourceTests(unittest.TestCase):
         self.assertIn("FTS5", html)
         self.assertIn("page: 3", html)
         self.assertIn("alarm snippet", html)
+        self.assertIn("background:#ffffff", html)
+        self.assertNotIn("background:#0f172a", html)
+
+    def test_source_card_html_hides_lone_filename_badge(self):
+        try:
+            import native_ui
+        except ImportError as exc:
+            self.skipTest(f"native_ui dependencies unavailable: {exc}")
+
+        html = native_ui._source_card_html({
+            "source": "C:/Users/OSLENG/Desktop/산업기능요원 병역지정업체 신청/증빙서류 사실 확인서.pdf",
+            "source_engine": "filename",
+        })
+
+        self.assertIn("증빙서류 사실 확인서.pdf", html)
+        self.assertIn("C:/Users/OSLENG/Desktop", html)
+        self.assertNotIn(">파일명<", html)
 
 
 if __name__ == "__main__":

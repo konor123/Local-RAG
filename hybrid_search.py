@@ -6,12 +6,12 @@ and participates only when the Phase 4 sidecar is explicitly enabled.
 """
 from __future__ import annotations
 
-import re
 import threading
 from typing import Dict, List
 
 from rrf import reciprocal_rank_fusion
 from search_result import SearchResult, from_content_result, from_file_result
+from search_terms import build_glob_patterns
 
 
 def normalize_file_results(result: Dict, limit: int = 10) -> List[SearchResult]:
@@ -28,21 +28,8 @@ def normalize_content_results(result: Dict, limit: int = 10) -> List[SearchResul
     return normalized
 
 
-_QUERY_STOPWORDS = {"찾아줘", "찾아", "주세요", "파일", "내용", "요약", "요약해줘", "확인", "확인해줘", "관련", "문서", "검색"}
-
-
 def _query_patterns(query: str) -> List[str]:
-    if any(ch in query for ch in "*?"):
-        return [query]
-    tokens = [t for t in re.findall(r"[0-9A-Za-z가-힣]{2,}", query or "") if t not in _QUERY_STOPWORDS]
-    patterns: List[str] = []
-    if tokens:
-        patterns.append("*" + "*".join(tokens[:5]) + "*")
-        for token in tokens[:2]:
-            patterns.append(f"*{token}*")
-    elif query.strip():
-        patterns.append("*" + query.strip()[:30] + "*")
-    return list(dict.fromkeys(patterns)) or ["*"]
+    return build_glob_patterns(query, preserve_existing_glob=True)
 
 
 def _search_content_with_timeout(query: str, k: int, timeout: int = 60) -> Dict:

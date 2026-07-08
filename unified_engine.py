@@ -5,7 +5,6 @@ Microft Azure AI Search의 'Agentic Retrieval' 디자인 패턴을 적용.
 Flow: Query -> Planner (LLM) -> Parallel Execution -> Synthesis -> Answer
 """
 import json
-import re
 import os
 import threading
 from typing import Dict, Generator, List, Any
@@ -23,7 +22,7 @@ from background_embedder import BackgroundEmbedder
 from conversation_logger import conversation_logger
 from ai_providers.provider_manager import get_provider
 from config_manager import load_config
-from query_router import classify_query
+from search_terms import build_glob_patterns, extract_search_tokens
 
 # --- Configuration ---
 MAX_WORKERS = 3  # 병렬 실행 스레드 수
@@ -35,31 +34,158 @@ def _search_config() -> Dict:
 
 
 def _significant_tokens(text: str) -> List[str]:
-    stop = {"찾아줘", "찾아", "주세요", "최신", "최근", "파일", "자료", "관련", "대한", "있는", "알려줘"}
-    tokens = re.findall(r"[0-9A-Za-z가-힣]{2,}", text or "")
-    return [t for t in tokens if t not in stop][:5]
+    return extract_search_tokens(text, limit=5)
 
 
 def _fallback_file_patterns(question: str) -> List[str]:
-    tokens = _significant_tokens(question)
-    patterns: List[str] = []
-    if tokens:
-        patterns.append("*" + "*".join(tokens) + "*")
-        for token in tokens[:2]:
-            patterns.append(f"*{token}*")
-    if not patterns and question.strip():
-        patterns.append("*" + question.strip()[:30] + "*")
-    return list(dict.fromkeys(patterns))[:4]
+    return build_glob_patterns(question, max_patterns=4)
 
 
-def _normalize_plan_file_first(plan: Dict, question: str) -> Dict:
-    sub_queries = list(plan.get("sub_queries", []))
-    if not any(sq.get("type") == "file" for sq in sub_queries):
-        for pattern in _fallback_file_patterns(question):
-            sub_queries.insert(0, {"type": "file", "query": pattern, "reason": "캐시된 경로/파일명 우선 검색"})
-    sub_queries.sort(key=lambda sq: 0 if sq.get("type") == "file" else 1)
-    plan["sub_queries"] = sub_queries
-    return plan
+
+MAX_PLANNING_ROUNDS = 2
+MAX_SUB_QUERIES_PER_ROUND = 4
+MAX_TOTAL_TOOL_CALLS = 8
+ALLOWED_TOOL_TYPES = {"file", "content", "hybrid"}
+
+
+def _normalize_llm_plan(plan: Dict) -> Dict:
+    """Normalize legacy and LLM-led planner outputs into a stable shape."""
+    if not isinstance(plan, dict):
+        return {}
+    mode = plan.get("mode")
+    if mode == "direct":
+        return {"mode": "direct", "reason": plan.get("reason", "LLM direct response")}
+    sub_queries = _coerce_sub_queries(plan.get("sub_queries", []))
+    if sub_queries:
+        return {"mode": "tools", "sub_queries": sub_queries, "reason": plan.get("reason", "LLM tool plan")}
+    return {}
+
+
+def _coerce_sub_queries(raw_queries: Any, limit: int = MAX_SUB_QUERIES_PER_ROUND) -> List[Dict]:
+    """Validate and trim LLM-requested tool calls while preserving LLM order."""
+    if not isinstance(raw_queries, list):
+        return []
+    queries: List[Dict] = []
+    for item in raw_queries:
+        if not isinstance(item, dict):
+            continue
+        q_type = str(item.get("type") or item.get("tool") or "").strip().lower()
+        query = str(item.get("query") or item.get("pattern") or "").strip()
+        if q_type not in ALLOWED_TOOL_TYPES or not query:
+            continue
+        queries.append({
+            "type": q_type,
+            "query": query,
+            "reason": str(item.get("reason") or "LLM requested tool"),
+        })
+        if len(queries) >= limit:
+            break
+    return queries
+
+
+def _fallback_llm_plan(question: str) -> Dict:
+    return {
+        "mode": "tools",
+        "fallback": True,
+        "sub_queries": [
+            {"type": "content", "query": question, "reason": "Planner failure fallback content search"},
+            *[{"type": "file", "query": p, "reason": "Planner failure fallback file search"} for p in _fallback_file_patterns(question)[:2]],
+        ],
+    }
+
+
+def _format_plan_desc(sub_queries: List[Dict]) -> str:
+    return "\n".join(
+        f"- [{sq.get('type', '').upper()}] {sq.get('query', '')} ({sq.get('reason', '')})"
+        for sq in sub_queries
+    )
+
+
+def _summarize_execution_results(execution_results: List[Dict], max_chars: int = 5000) -> str:
+    summary = []
+    for item in execution_results[-8:]:
+        sq = item.get("sub_query", {})
+        data = item.get("data", {})
+        result = data.get("result", {}) if isinstance(data, dict) else {}
+        rows = []
+        for r in result.get("results", [])[:3]:
+            rows.append({
+                "name": r.get("name") or os.path.basename(r.get("source", "") or r.get("path", "")),
+                "path": r.get("path") or r.get("source"),
+                "score": r.get("score"),
+                "snippet": str(r.get("content") or "")[:180],
+            })
+        summary.append({
+            "type": data.get("type"),
+            "query": sq.get("query"),
+            "count": result.get("count", 0),
+            "top_results": rows,
+        })
+    return json.dumps(summary, ensure_ascii=False, default=str)[:max_chars]
+
+
+def _answer_direct(question: str, chat_history: List[tuple] = None) -> Generator[Dict, None, None]:
+    history_str = ""
+    if chat_history:
+        for role, msg in chat_history[-5:]:
+            history_str += f"{role}: {msg}\n"
+    context = "검색 도구를 사용하지 않고 답변해도 되는 일반 대화/질문입니다. 내부 문서 근거가 필요한 내용이면 근거가 없다고 밝히세요."
+    answer = get_provider().synthesize(question, context, history_str)
+    if answer:
+        yield {"type": "answer", "content": answer, "sources": [], "source_count": 0}
+        return
+    yield {"type": "error", "content": "Direct answer synthesis failed"}
+
+
+def _review_tool_results(
+    question: str,
+    execution_results: List[Dict],
+    chat_history: List[tuple] = None,
+    round_index: int = 1,
+) -> Dict:
+    """Ask the LLM whether to answer, search more, or give up after a tool round."""
+    history_str = ""
+    if chat_history:
+        for role, msg in chat_history[-3:]:
+            history_str += f"{role}: {msg}\n"
+
+    llm_kwargs = {
+        "model": LLM_MODEL,
+        "base_url": OLLAMA_BASE_URL,
+        "temperature": 0,
+        "keep_alive": -1,
+        "format": "json",
+        "num_ctx": LLM_NUM_CTX,
+        "num_predict": LLM_NUM_PREDICT,
+    }
+    if ChatOllama.__module__.startswith("langchain_ollama"):
+        llm_kwargs["sync_client_kwargs"] = {"timeout": LLM_REQUEST_TIMEOUT}
+    else:
+        llm_kwargs["timeout"] = LLM_REQUEST_TIMEOUT
+    llm = ChatOllama(**llm_kwargs)
+    system_prompt = """당신은 검색 전략 검토자입니다. 검색 결과를 보고 다음 행동을 JSON으로만 결정하세요.
+허용 action: "answer", "search_more", "give_up".
+search_more를 선택할 때만 sub_queries를 포함하세요. type은 file, content, hybrid 중 하나입니다.
+이미 충분한 근거가 있으면 answer를 선택하세요. 같은 검색을 반복하지 마세요."""
+    prompt = f"""대화 기록:
+{history_str}
+
+사용자 질문: {question}
+현재 라운드: {round_index}
+검색 결과 요약 JSON:
+{_summarize_execution_results(execution_results)}
+
+출력 예:
+{{"action":"answer","reason":"충분한 근거 확보"}}
+{{"action":"search_more","reason":"검색 결과 부족","sub_queries":[{{"type":"content","query":"수정 검색어","reason":"다른 표현으로 재검색"}}]}}
+{{"action":"give_up","reason":"관련 근거 없음"}}
+"""
+    try:
+        response = llm.invoke([SystemMessage(content=system_prompt), HumanMessage(content=prompt)])
+        return json.loads(response.content)
+    except Exception as exc:
+        print(f"[Review] LLM review failed: {exc}")
+        return {"action": "answer", "reason": "review fallback"}
 
 def get_unified_response(
     question: str,
@@ -67,40 +193,33 @@ def get_unified_response(
     stream: bool = True
 ) -> Generator[Dict, None, None]:
     """
-    통합 응답 생성기 (Agentic Flow).
+    통합 응답 생성기. LLM이 검색/즉답/재검색 전략을 지휘합니다.
     """
-    # 1. Query Planning (계획 수립)
-    yield {"type": "thinking", "content": "🤔 질문 분석 및 검색 계획 수립 중..."}
-    
-    intent = classify_query(question)
-    if intent == "hybrid":
-        plan = {"sub_queries": [{"type": "hybrid", "query": question, "reason": "명확한 통합 검색 의도"}]}
-    else:
-        plan = _plan_query(question, chat_history)
-    
-    if not plan or not plan.get("sub_queries"):
-        yield {"type": "thinking", "content": "⚠️ 계획 수립 실패, 기본 검색으로 전환합니다."}
-        # Fallback: cached filename search first, content search second.
-        plan = {
-            "sub_queries": [
-                *[{"type": "file", "query": p, "reason": "Fallback file-first"} for p in _fallback_file_patterns(question)],
-                {"type": "content", "query": question, "reason": "Fallback content"},
-            ]
-        }
-    else:
-        plan = _normalize_plan_file_first(plan, question)
-        # 계획 표시
-        plan_desc = "\n".join([f"- [{sq['type'].upper()}] {sq['query']} ({sq['reason']})" for sq in plan['sub_queries']])
-        yield {"type": "thinking", "content": f"📋 검색 계획:\n{plan_desc}"}
+    yield {"type": "thinking", "content": "🤔 LLM이 응답/검색 전략을 수립 중..."}
 
-    # 2. Execution (실행): cached file/path search first, content search only if needed.
-    yield {"type": "thinking", "content": "🚀 캐시된 경로/파일명 검색을 먼저 실행합니다..."}
-    
-    execution_results = []
-    
-    file_queries = [sq for sq in plan["sub_queries"] if sq.get("type") == "file"]
-    content_queries = [sq for sq in plan["sub_queries"] if sq.get("type") == "content"]
-    hybrid_queries = [sq for sq in plan["sub_queries"] if sq.get("type") == "hybrid"]
+    raw_plan = _plan_query(question, chat_history)
+    plan = _normalize_llm_plan(raw_plan)
+    if not plan:
+        yield {"type": "thinking", "content": "⚠️ LLM 계획 수립 실패, 제한적 fallback 검색으로 전환합니다."}
+        plan = _fallback_llm_plan(question)
+
+    plan_trace = {"mode": plan.get("mode", "tools"), "rounds": [], "initial_plan": plan}
+    execution_results: List[Dict] = []
+    final_answer = ""
+
+    if plan.get("mode") == "direct":
+        yield {"type": "thinking", "content": f"💬 LLM 판단: 검색 없이 답변합니다. ({plan.get('reason', '')})"}
+        for event in _answer_direct(question, chat_history):
+            if event.get("type") == "answer":
+                final_answer = event.get("content", "")
+            yield event
+        is_success = bool(final_answer) and "죄송합니다" not in final_answer and "정보를 찾을 수 없습니다" not in final_answer
+        conversation_logger.log_interaction(question=question, plan=plan_trace, answer=final_answer, success=is_success)
+        return
+
+    current_queries = _coerce_sub_queries(plan.get("sub_queries", []))
+    seen_calls = set()
+    total_tool_calls = 0
 
     def run_query(sq: Dict, allow_jit: bool = True) -> Dict:
         final_data = {}
@@ -111,43 +230,61 @@ def get_unified_response(
                 final_data = data
         return final_data
 
-    for sq in file_queries:
-        data = yield from run_query(sq, allow_jit=False)
-        execution_results.append({"sub_query": sq, "data": data})
+    for round_index in range(1, MAX_PLANNING_ROUNDS + 1):
+        if not current_queries:
+            break
+        yield {"type": "thinking", "content": f"📋 LLM 검색 계획 Round {round_index}:\n{_format_plan_desc(current_queries)}"}
+        round_record = {"round": round_index, "sub_queries": list(current_queries), "results": []}
 
-    file_count = sum(item["data"].get("result", {}).get("count", 0) for item in execution_results if item["data"].get("type") == "file")
-    sufficient_count = int(_search_config().get("file_search_sufficient_count", 1))
-    if hybrid_queries:
-        yield {"type": "thinking", "content": "🔄 하이브리드 검색을 실행합니다..."}
-        for sq in hybrid_queries:
-            data = yield from run_query(sq)
-            execution_results.append({"sub_query": sq, "data": data})
-    elif file_count >= sufficient_count:
-        yield {"type": "thinking", "content": f"✅ 캐시된 파일명/경로 검색에서 {file_count}개 발견. 임베딩 검색은 생략합니다."}
-    else:
-        yield {"type": "thinking", "content": "📚 파일명 결과가 부족하여 임베딩/내용 검색을 실행합니다..."}
-        if not content_queries:
-            content_queries = [{"type": "content", "query": question, "reason": "파일 검색 결과 부족 fallback"}]
-        for sq in content_queries:
-            data = yield from run_query(sq)
-            execution_results.append({"sub_query": sq, "data": data})
+        for sq in current_queries:
+            call_key = (sq.get("type"), sq.get("query"))
+            if call_key in seen_calls:
+                yield {"type": "thinking", "content": f"↩️ 중복 검색 생략: [{sq.get('type')}] {sq.get('query')}"}
+                continue
+            if total_tool_calls >= MAX_TOTAL_TOOL_CALLS:
+                yield {"type": "thinking", "content": "⛔ 최대 도구 호출 수에 도달하여 추가 검색을 중단합니다."}
+                current_queries = []
+                break
+            seen_calls.add(call_key)
+            total_tool_calls += 1
+            data = yield from run_query(sq, allow_jit=sq.get("type") == "file")
+            result_item = {"sub_query": sq, "data": data}
+            execution_results.append(result_item)
+            round_record["results"].append({
+                "type": data.get("type") if isinstance(data, dict) else None,
+                "count": data.get("result", {}).get("count", 0) if isinstance(data, dict) else 0,
+            })
 
-    # 3. Active Learning (JIT Ingestion) implicitly handled in execution
+        plan_trace["rounds"].append(round_record)
+        if round_index >= MAX_PLANNING_ROUNDS:
+            break
 
-    # 4. Synthesis (종합 및 답변)
-    yield {"type": "thinking", "content": "🧠 수집된 정보를 종합하여 답변을 생성합니다..."}
-    
-    final_answer = ""
-    for event in _synthesize_answer(question, execution_results, chat_history):
-        if event['type'] == 'answer':
-            final_answer = event['content']
-        yield event
-        
-    # [Logging] 대화 기록 저장 (실패 분석용)
-    is_success = "죄송합니다" not in final_answer and "정보를 찾을 수 없습니다" not in final_answer
+        yield {"type": "thinking", "content": "🧭 LLM이 검색 결과를 검토하고 다음 전략을 결정 중..."}
+        review = _review_tool_results(question, execution_results, chat_history, round_index=round_index)
+        round_record["review"] = review
+        action = str(review.get("action") or "answer").strip().lower()
+        if action == "search_more":
+            next_queries = _coerce_sub_queries(review.get("sub_queries", []))
+            if next_queries:
+                current_queries = next_queries
+                continue
+        if action == "give_up":
+            final_answer = review.get("answer") or f"관련 근거를 충분히 찾지 못했습니다. ({review.get('reason', '검색 결과 부족')})"
+            yield {"type": "answer", "content": final_answer, "sources": [], "source_count": 0}
+            break
+        break
+
+    if not final_answer:
+        yield {"type": "thinking", "content": "🧠 LLM이 수집된 근거를 종합하여 답변을 생성합니다..."}
+        for event in _synthesize_answer(question, execution_results, chat_history):
+            if event.get('type') == 'answer':
+                final_answer = event.get('content', '')
+            yield event
+
+    is_success = bool(final_answer) and "죄송합니다" not in final_answer and "정보를 찾을 수 없습니다" not in final_answer
     conversation_logger.log_interaction(
         question=question,
-        plan=plan,
+        plan=plan_trace,
         answer=final_answer,
         success=is_success
     )
@@ -165,9 +302,9 @@ def _plan_query(question: str, chat_history: List[tuple] = None) -> Dict:
              history_str += f"{role}: {msg}\n"
     
     # 1차: Local Ollama provider (get_provider)
-    result = get_provider().plan_query(question, history_str)
-    if result and result.get("sub_queries"):
-        print(f"[Plan] Local provider success: {len(result['sub_queries'])} sub-queries")
+    result = _normalize_llm_plan(get_provider().plan_query(question, history_str))
+    if result:
+        print(f"[Plan] Local provider success: mode={result.get('mode')}, sub_queries={len(result.get('sub_queries', []))}")
         return result
 
     # 2차: deterministic fallback using the same local model with a simpler prompt
@@ -187,28 +324,35 @@ def _plan_query(question: str, chat_history: List[tuple] = None) -> Dict:
         llm_kwargs["timeout"] = LLM_REQUEST_TIMEOUT
     llm = ChatOllama(**llm_kwargs)
     
-    system_prompt = f"""You are a Query Planner. Break down the user's request into actionable sub-queries.
+    system_prompt = f"""You are a retrieval strategy planner. Decide whether the user's request needs tools or can be answered directly.
 You have access to the conversation history to resolve coreferences (e.g., 'it', 'that file', 'previous one').
 
 Conversation History:
 {history_str}
 
 Output format: JSON only.
-Structure:
+Allowed structures:
+{{"mode":"direct","reason":"why no search is needed"}}
+
+or
+
 {{
+  "mode": "tools",
   "sub_queries": [
     {{"type": "file", "query": "filename_pattern", "reason": "why"}},
-    {{"type": "content", "query": "search_keywords", "reason": "why"}}
+    {{"type": "content", "query": "search_keywords", "reason": "why"}},
+    {{"type": "hybrid", "query": "search_keywords", "reason": "why"}}
   ]
 }}
 
 Rules:
-1. If user refers to previous context (e.g. "What is the price of *that*?"), REPLACE 'that' with the actual subject from history.
-2. Cached filename/path search is the first priority. Prefer "file" type first.
-3. "file" type: Use for finding files. Glob pattern (e.g. *keyword*.xlsx, *catalog*).
-4. For document-finding requests (file, catalog, quotation, drawing, manual, certificate), include file searches before content searches.
-5. "content" type: Use only when the user asks about content/meaning/details that may require embedded document text.
-6. If the user asks for "2026 Sales Plan", include a file search first and content search second.
+1. You control the strategy. Do not default to file-first; choose the tool type and order that best fits the question.
+2. If the user refers to previous context (e.g. "What is the price of *that*?"), replace it with the actual subject from history.
+3. Use mode="direct" only for greetings, app usage help, or general questions that do not need internal document evidence.
+4. "file" type: use for locating known filenames/paths/extensions. Query should be a glob pattern (e.g. *keyword*.xlsx, *catalog*).
+5. "content" type: use when document meaning/details may require embedded text search.
+6. "hybrid" type: use when filename and semantic content should both be searched. Hybrid is a tool, not a routing mode.
+7. Maximum 4 sub_queries. Preserve the order you want tools executed.
 """
     
     try:
@@ -216,7 +360,7 @@ Rules:
             SystemMessage(content=system_prompt),
             HumanMessage(content=question)
         ])
-        return json.loads(response.content)
+        return _normalize_llm_plan(json.loads(response.content))
     except Exception as e:
         print(f"[Plan] Ollama fallback also failed: {e}")
         return None

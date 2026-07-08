@@ -8,6 +8,7 @@ import re
 from typing import List, Dict, Optional, Generator
 from tools import TOOL_DEFINITIONS, execute_tool
 from config_manager import get_local_ai_config, load_config
+from search_terms import extract_search_tokens
 
 # Configuration
 MAX_TOOL_CALLS = 10
@@ -95,8 +96,7 @@ def _parse_json_object(text: str) -> Optional[Dict]:
 
 
 def _fallback_manual_tool_calls(question: str) -> List[Dict]:
-    tokens = re.findall(r"[0-9A-Za-z가-힣]{2,}", question)
-    keywords = tokens[:3] or [question.strip()[:30] or "*"]
+    keywords = extract_search_tokens(question, limit=3) or [question.strip()[:30] or "*"]
     pattern = "*" + "*".join(keywords) + "*"
     query = " ".join(keywords)
     return [

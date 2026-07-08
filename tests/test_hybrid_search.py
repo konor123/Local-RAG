@@ -110,6 +110,32 @@ class HybridSearchTests(unittest.TestCase):
         self.assertIn("*유도등*카탈로그*", seen_patterns)
         self.assertNotIn("*유도등 카탈로그 내용 요약해줘*", seen_patterns)
 
+    def test_hybrid_search_patterns_filter_shared_stopwords(self):
+        from hybrid_search import _query_patterns
+
+        patterns = _query_patterns("최신 유도등 카탈로그 파일 찾아줘")
+
+        self.assertEqual(patterns[0], "*유도등*카탈로그*")
+        self.assertNotIn("최신", " ".join(patterns))
+        self.assertNotIn("파일", " ".join(patterns))
+        self.assertNotIn("찾아줘", " ".join(patterns))
+
+    def test_shared_query_pattern_builder_matches_hybrid_path(self):
+        from hybrid_search import _query_patterns
+        from search_terms import build_glob_patterns
+
+        query = "최근 불꽃감지기 카탈로그 자료 확인해줘"
+
+        self.assertEqual(_query_patterns(query), build_glob_patterns(query))
+
+    def test_manual_agent_fallback_filters_stopwords(self):
+        from agent_engine import _fallback_manual_tool_calls
+
+        calls = _fallback_manual_tool_calls("불꽃감지기 카탈로그 파일 찾아줘")
+
+        self.assertEqual(calls[0]["args"]["pattern"], "*불꽃감지기*카탈로그*")
+        self.assertEqual(calls[1]["args"]["query"], "불꽃감지기 카탈로그")
+
     def test_hybrid_search_includes_configured_metadata_fts_results(self):
         import tools
         from hybrid_search import hybrid_search

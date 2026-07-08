@@ -14,7 +14,7 @@ class AIProvider(ABC):
 
     @abstractmethod
     def plan_query(self, question: str, history_str: str = "") -> Optional[dict]:
-        """Create a structured search plan."""
+        """Create an LLM-led plan: direct answer intent or ordered tool sub-queries."""
 
     @abstractmethod
     def synthesize(self, question: str, context: str, history_str: str = "") -> Optional[str]:
