@@ -8,7 +8,7 @@
 #define MyAppName "OSL AI Assistant"
 #define MyAppNameShort "OSL AI Assistant"
 #define MyAppNameShortNoSpace "OSL_AI_Assistant"
-#define MyAppVersion "1.3.0"
+#define MyAppVersion "1.3.1"
 #define MyAppPublisher "OSL ENG"
 #define MyAppURL "https://example.com"
 #define MyAppExeName "OSL_AI_Assistant.exe"
@@ -131,6 +131,17 @@ begin
   end;
 end;
 
+procedure StopOllamaProcesses();
+var
+  ResultCode: Integer;
+begin
+  // Update reliability is more important than keeping a running Ollama server.
+  // taskkill returns a non-zero code when the process is absent; this is OK.
+  Exec(ExpandConstant('{sys}\taskkill.exe'), '/F /T /IM ollama.exe', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  Exec(ExpandConstant('{sys}\taskkill.exe'), '/F /T /IM ollama_llama_server.exe', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  Exec(ExpandConstant('{sys}\taskkill.exe'), '/F /T /IM llama-server.exe', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+end;
+
 function GetCustomSetupExitCode: Integer;
 begin
   if FatalPostInstallFailure then
@@ -158,6 +169,7 @@ end;
 function PrepareToInstall(var NeedsRestart: Boolean): String;
 begin
   Result := '';
+  StopOllamaProcesses();
   if not UrlReachable('https://registry.ollama.ai/v2/') then
     Result := 'Ollama 모델 다운로드를 위해 인터넷 연결이 필요합니다. 네트워크 연결을 확인한 뒤 설치를 다시 실행하세요.';
 end;
@@ -242,6 +254,9 @@ procedure CurStepChanged(CurStep: TSetupStep);
 var
   BatPath, BatContent: String;
 begin
+  if CurStep = ssInstall then
+    StopOllamaProcesses();
+
   if CurStep = ssPostInstall then
   begin
     if not InstallRequiredOllamaModels() then
@@ -258,4 +273,10 @@ begin
         MsgBox('시작 프로그램 바로가기를 만들지 못했습니다.', mbError, MB_OK);
     end;
   end;
+end;
+
+procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
+begin
+  if CurUninstallStep = usUninstall then
+    StopOllamaProcesses();
 end;

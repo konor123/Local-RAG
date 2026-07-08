@@ -52,6 +52,90 @@ class ResourceGuardrailTests(unittest.TestCase):
         embedder._embedding_loop(["C:/fixture/skip.bin"])
         self.assertEqual(calls, [])
 
+    def test_embedding_status_distinguishes_idle_monitoring_from_progress_counts(self):
+        from background_embedder import BackgroundEmbedder
+
+        embedder = BackgroundEmbedder()
+        embedder._update_state(
+            state="idle",
+            current_file="모니터링 중",
+            source_total=10,
+            processable_total=0,
+            current_index=0,
+            remaining_count=0,
+        )
+        status = embedder.get_status()
+
+        self.assertEqual(status["state"], "idle")
+        self.assertEqual(status["source_total"], 10)
+        self.assertEqual(status["processable_total"], 0)
+        self.assertEqual(status["current_index"], 0)
+        self.assertEqual(status["remaining_count"], 0)
+
+    def test_tray_embedding_text_does_not_render_idle_as_zero_progress(self):
+        try:
+            from native_ui import BackgroundTaskManager
+        except ImportError as exc:
+            self.skipTest(f"native_ui dependencies unavailable: {exc}")
+
+        class DummyEmbedder:
+            def is_running(self):
+                return True
+
+            def get_status(self):
+                return {
+                    "state": "idle",
+                    "processed_count": 0,
+                    "skip_count": 0,
+                    "error_count": 0,
+                    "current_file": "모니터링 중",
+                    "processable_total": 0,
+                    "current_index": 0,
+                    "total_processed": 12,
+                }
+
+        class ManagerProxy:
+            pass
+
+        manager = ManagerProxy()
+        manager.embedder = DummyEmbedder()
+        text = BackgroundTaskManager.embed_text(manager)
+
+        self.assertIn("대기 파일 없음", text)
+        self.assertNotIn("0 OK", text)
+
+    def test_tray_embedding_text_shows_current_index_for_active_work(self):
+        try:
+            from native_ui import BackgroundTaskManager
+        except ImportError as exc:
+            self.skipTest(f"native_ui dependencies unavailable: {exc}")
+
+        class DummyEmbedder:
+            def is_running(self):
+                return True
+
+            def get_status(self):
+                return {
+                    "state": "embedding",
+                    "processed_count": 2,
+                    "skip_count": 0,
+                    "error_count": 0,
+                    "current_file": "manual.pdf",
+                    "processable_total": 5,
+                    "current_index": 3,
+                    "total_processed": 20,
+                }
+
+        class ManagerProxy:
+            pass
+
+        manager = ManagerProxy()
+        manager.embedder = DummyEmbedder()
+        text = BackgroundTaskManager.embed_text(manager)
+
+        self.assertIn("3/5", text)
+        self.assertIn("manual.pdf", text)
+
     def test_vectorstore_failures_disable_session_after_cap(self):
         import faiss_store
         from background_embedder import BackgroundEmbedder

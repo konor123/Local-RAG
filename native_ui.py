@@ -130,6 +130,58 @@ def _ensure_ollama_running() -> bool:
     raise RuntimeError("Ollama 서버가 시작되지 않았습니다. 포트 11434를 확인하세요.")
 
 
+def _run_hidden(args: List[str], timeout: float = 8.0) -> int:
+    kwargs = {}
+    if os.name == "nt":
+        kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
+    proc = subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, **kwargs)
+    try:
+        return proc.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        return -1
+
+
+def _stop_ollama(force: bool = True, include_name_fallback: bool = False) -> None:
+    """Stop Ollama owned by this app; optionally kill all Ollama for updates.
+
+    Normal app quit only stops the process we launched. Update/install flows can
+    request the image-name fallback because bundled files must be unlocked before
+    the installer replaces them.
+    """
+    global _ollama_process
+    owned_process = _ollama_process
+    _ollama_process = None
+    if owned_process is None and not include_name_fallback:
+        return
+
+    if owned_process is not None and owned_process.poll() is None:
+        try:
+            if os.name == "nt":
+                args = ["taskkill", "/PID", str(owned_process.pid), "/T"]
+                if force:
+                    args.append("/F")
+                _run_hidden(args)
+            else:
+                owned_process.terminate()
+                try:
+                    owned_process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    if force:
+                        owned_process.kill()
+        except Exception as exc:
+            print(f"[Ollama] App-owned stop failed: {exc}")
+
+    if include_name_fallback and os.name == "nt":
+        for image in ("ollama.exe", "ollama_llama_server.exe", "llama-server.exe"):
+            try:
+                code = _run_hidden(["taskkill", "/F", "/T", "/IM", image])
+                if code not in (0, 128):
+                    print(f"[Ollama] taskkill {image} exited with {code}")
+            except Exception as exc:
+                print(f"[Ollama] taskkill {image} failed: {exc}")
+
+
 # ─── Tray icon ──────────────────────────────────────────
 def _make_tray_icon() -> QIcon:
     return QIcon(_asset_path("tray_icon.png"))
@@ -530,13 +582,31 @@ class BackgroundTaskManager(QObject):
         processed = st.get("processed_count", 0)
         skip = st.get("skip_count", 0)
         error = st.get("error_count", 0)
-        current = st.get("current_file", "")
-        if self.embedder.is_running():
-            current = current[:18]
-            if not current:
-                current = "모니터링 중"
-            return f"⚙️ 임베딩: {current} ({processed:,} OK / {skip:,} skip / {error:,} err)"
         total = st.get("total_processed", 0)
+        state = st.get("state", "idle")
+        current = (st.get("current_file", "") or "")[:18]
+        processable_total = int(st.get("processable_total", 0) or 0)
+        current_index = int(st.get("current_index", 0) or 0)
+
+        if self.embedder.is_running():
+            if state == "embedding" and processable_total:
+                name = current or "처리 중"
+                return f"⚙️ 임베딩 중: {current_index:,}/{processable_total:,} · {name}"
+            if state == "loading":
+                return "⚙️ 임베딩: 인덱스 준비 중..."
+            if state == "backoff":
+                return f"⚙️ 임베딩: 재시도 대기 중 · 오류 {error:,}"
+            if state == "disabled":
+                return "⚙️ 임베딩: 비활성화됨"
+            if state in ("idle", "scanning") and processable_total == 0:
+                return f"⚙️ 임베딩: 모니터링 중 · 대기 파일 없음 (누적 {total:,})"
+            label = current or "파일 확인 중"
+            return f"⚙️ 임베딩: {label} · 대기 {processable_total:,}개"
+        total = st.get("total_processed", 0)
+        if state == "completed":
+            return f"⚙️ 임베딩 완료: 성공 {processed:,}, 건너뜀 {skip:,}, 오류 {error:,}"
+        if state == "disabled":
+            return "⚙️ 임베딩: 비활성화됨"
         return f"⚙️ 임베딩: 대기 (누적 {total:,} 처리)"
 
 
@@ -738,6 +808,8 @@ class ChatWindow(QMainWindow):
         try:
             installer_path = download_and_prepare_update(update_info, on_progress)
             progress.setValue(100)
+            self.bg.stop()
+            _stop_ollama(force=True, include_name_fallback=True)
             launch_installer(installer_path)
             self.quit_app()
         except Exception as e:
@@ -869,6 +941,7 @@ class ChatWindow(QMainWindow):
 
     def quit_app(self) -> None:
         self.bg.stop()
+        _stop_ollama(force=True, include_name_fallback=False)
         self.tray.hide()
         QApplication.quit()
 

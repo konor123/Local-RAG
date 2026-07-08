@@ -137,6 +137,12 @@ class BackgroundEmbedder:
         self._error_count = 0
         self._current_file = ""
         self._last_error = ""
+        self._state = "disabled" if not bool(_embedding_config().get("enabled", True)) else "idle"
+        self._source_total = 0
+        self._processable_total = 0
+        self._current_index = 0
+        self._remaining_count = 0
+        self._last_status_updated_at = time.time()
         self._status_callback: Optional[Callable] = None
         self._file_provider: Optional[Callable[[], List[str]]] = None
         self._limit: Optional[int] = None
@@ -153,6 +159,54 @@ class BackgroundEmbedder:
         
         # 처리된 파일 목록 로드
         self._processed_files: Set[str] = self._load_processed_files()
+
+    def _update_state(
+        self,
+        state: Optional[str] = None,
+        current_file: Optional[str] = None,
+        source_total: Optional[int] = None,
+        processable_total: Optional[int] = None,
+        current_index: Optional[int] = None,
+        remaining_count: Optional[int] = None,
+        last_error: Optional[str] = None,
+    ) -> None:
+        """Update coarse progress fields for UI polling.
+
+        Existing counters remain cumulative. These fields describe the current
+        queue snapshot so idle monitoring is not rendered as fake 0/0/0 work.
+        """
+        with self._lock:
+            if state is not None:
+                self._state = state
+            if current_file is not None:
+                self._current_file = current_file
+            if source_total is not None:
+                self._source_total = max(0, int(source_total))
+            if processable_total is not None:
+                self._processable_total = max(0, int(processable_total))
+            if current_index is not None:
+                self._current_index = max(0, int(current_index))
+            if remaining_count is not None:
+                self._remaining_count = max(0, int(remaining_count))
+            if last_error is not None:
+                self._last_error = last_error
+            self._last_status_updated_at = time.time()
+
+    def _record_sidecar_status(self, filepath: str, status: str, detail: str = "") -> None:
+        try:
+            from sqlite_index import safe_record_status
+
+            safe_record_status(filepath, status, detail)
+        except Exception:
+            pass
+
+    def _record_sidecar_chunks(self, filepath: str, chunks: List[dict]) -> None:
+        try:
+            from sqlite_index import safe_upsert_chunks
+
+            safe_upsert_chunks(filepath, chunks, status="ok")
+        except Exception:
+            pass
 
     def _record_status(self, filepath: str, status: str) -> None:
         ext = os.path.splitext(filepath)[1].lower() or "<no_ext>"
@@ -277,17 +331,19 @@ class BackgroundEmbedder:
         """단일 파일 처리"""
         from langchain_text_splitters import RecursiveCharacterTextSplitter
         
-        self._current_file = os.path.basename(filepath)
+        self._update_state(current_file=os.path.basename(filepath))
         
         # 확장자 필터
         ext = os.path.splitext(filepath)[1].lower()
         if _is_temporary_office_file(filepath):
             self._skip_count += 1
             self._record_status(filepath, "temporary_file")
+            self._record_sidecar_status(filepath, "temporary_file", "Office temporary lock file")
             return False
         if ext not in EMBEDDABLE_EXTENSIONS:
             self._skip_count += 1
             self._record_status(filepath, "unsupported_extension")
+            self._record_sidecar_status(filepath, "unsupported_extension", f"Unsupported extension: {ext}")
             return False  # 지원하지 않는 확장자 → 무시 (로그 안 남김)
         
         # 파일 존재 확인
@@ -295,6 +351,7 @@ class BackgroundEmbedder:
             _log.debug(f"SKIP (not found): {filepath}")
             self._skip_count += 1
             self._record_status(filepath, "missing_file")
+            self._record_sidecar_status(filepath, "missing_file", "File no longer exists")
             return False
         
         try:
@@ -310,6 +367,7 @@ class BackgroundEmbedder:
                 else:
                     self._error_count += 1
                 self._record_status(filepath, category)
+                self._record_sidecar_status(filepath, category, data.get('detail', ''))
                 _log.warning(f"FAIL ({category}): {self._current_file} | {data.get('detail', '')[:100]}")
                 return False
 
@@ -338,6 +396,7 @@ class BackgroundEmbedder:
                 _log.debug(f"SKIP (no chunks): {self._current_file}")
                 self._skip_count += 1
                 self._record_status(filepath, "no_chunks")
+                self._record_sidecar_status(filepath, "no_chunks", "Loader returned no chunks")
                 return False
             
             # VectorStore index 추가
@@ -357,6 +416,7 @@ class BackgroundEmbedder:
                 _log.debug(f"SKIP (no valid docs): {self._current_file}")
                 self._skip_count += 1
                 self._record_status(filepath, "no_chunks")
+                self._record_sidecar_status(filepath, "no_chunks", "No valid document chunks")
                 return False
             
             # 임베딩 생성 (모델 로딩)
@@ -364,6 +424,7 @@ class BackgroundEmbedder:
                 _log.error(f"FAIL (model not loaded): {self._current_file}")
                 self._error_count += 1
                 self._record_status(filepath, "embedding_error")
+                self._record_sidecar_status(filepath, "embedding_error", self._last_error)
                 return False
             
             splitter = RecursiveCharacterTextSplitter(
@@ -387,6 +448,7 @@ class BackgroundEmbedder:
             if final_docs:
                 add_documents(final_docs)
                 save_index()  # 매 파일마다 저장 (크래시 방지)
+                self._record_sidecar_chunks(filepath, final_docs)
                 self._processed_count += 1
                 self._record_status(filepath, "ok")
                 _log.info(f"OK ({len(final_docs)} chunks): {self._current_file}")
@@ -395,13 +457,16 @@ class BackgroundEmbedder:
                 _log.debug(f"SKIP (0 chunks after split): {self._current_file}")
                 self._skip_count += 1
                 self._record_status(filepath, "no_chunks")
+                self._record_sidecar_status(filepath, "no_chunks", "Text splitter produced no chunks")
                 return False
             
         except Exception as e:
             self._last_error = f"Error: {self._current_file} - {str(e)[:100]}"
             _log.error(f"FAIL (exception): {self._current_file} | {str(e)[:150]}")
             self._error_count += 1
-            self._record_status(filepath, _classify_error_text(str(e)))
+            category = _classify_error_text(str(e))
+            self._record_status(filepath, category)
+            self._record_sidecar_status(filepath, category, str(e))
             return False
     
     def _embedding_loop(self, files: List[str]) -> None:
@@ -413,6 +478,14 @@ class BackgroundEmbedder:
         """
         _log.info(f"=== Embedding loop START: {len(files)} initial files ===")
         print(f"[Embedder] Starting embedding loop for {len(files)} initial files")
+        self._update_state(
+            state="scanning",
+            current_file="파일 확인 중",
+            source_total=len(files),
+            processable_total=0,
+            current_index=0,
+            remaining_count=0,
+        )
 
         try:
             while not self._should_stop:
@@ -423,6 +496,7 @@ class BackgroundEmbedder:
                     except Exception as provider_error:
                         self._last_error = f"File provider failed: {provider_error}"
                         _log.warning(self._last_error)
+                        self._update_state(state="error", last_error=self._last_error)
                         source_files = []
 
                 new_files = sorted(
@@ -433,9 +507,22 @@ class BackgroundEmbedder:
                     new_files = new_files[: self._limit]
 
                 processable_files = self._filter_processable_files(new_files)
+                self._update_state(
+                    state="scanning",
+                    source_total=len(source_files),
+                    processable_total=len(processable_files),
+                    current_index=0,
+                    remaining_count=len(processable_files),
+                )
 
                 if not processable_files:
-                    self._current_file = "모니터링 중"
+                    self._update_state(
+                        state="idle",
+                        current_file="모니터링 중",
+                        processable_total=0,
+                        current_index=0,
+                        remaining_count=0,
+                    )
                     if self._status_callback:
                         self._status_callback(self._processed_count, len(source_files), self._current_file, False)
                     if self._file_provider is None:
@@ -445,11 +532,14 @@ class BackgroundEmbedder:
                     continue
 
                 # 모델 및 벡터스토어 로드 (처리할 파일이 있을 때만)
+                self._update_state(state="loading", current_file="인덱스 준비 중", remaining_count=len(processable_files))
                 if not self._lazy_load_vectorstore():
                     if self._embedding_disabled_for_session:
+                        self._update_state(state="disabled", current_file="임베딩 비활성화", last_error=self._last_error)
                         _log.error(f"VectorStore load FAILED: {self._last_error} — embedding disabled for this session")
                         break
                     retry_delay = self._vectorstore_retry_delay() or self.idle_sleep
+                    self._update_state(state="backoff", current_file=f"재시도 대기 {retry_delay}s", last_error=self._last_error)
                     _log.error(f"VectorStore load FAILED: {self._last_error} — retrying after {retry_delay}s")
                     time.sleep(retry_delay)
                     continue
@@ -463,6 +553,13 @@ class BackgroundEmbedder:
                     if filepath in self._processed_files:
                         continue
 
+                    self._update_state(
+                        state="embedding",
+                        current_file=os.path.basename(filepath),
+                        current_index=i + 1,
+                        processable_total=len(processable_files),
+                        remaining_count=max(0, len(processable_files) - (i + 1)),
+                    )
                     success = self._process_file(filepath)
 
                     if success:
@@ -480,9 +577,12 @@ class BackgroundEmbedder:
 
                 if self._file_provider is None:
                     break
+                self._update_state(state="idle", current_file="모니터링 중", current_index=0, remaining_count=0)
         finally:
-            self._is_running = False
-            self._current_file = ""
+            final_state = "stopped" if self._should_stop else ("idle" if self._file_provider is not None else "completed")
+            with self._lock:
+                self._is_running = False
+            self._update_state(state=final_state, current_file="", current_index=0, remaining_count=0)
             _log.info(f"=== Embedding loop END: ok={self._processed_count} | skip={self._skip_count} | err={self._error_count} ===")
             print(f"[Embedder] Embedding loop stopped. Processed: {self._processed_count}")
     
@@ -498,26 +598,37 @@ class BackgroundEmbedder:
         Returns:
             시작 성공 여부
         """
+        files = files or []
         with self._lock:
             if self._is_running:
                 return False
             if self._embedding_disabled_for_session:
+                self._update_state(state="disabled", current_file="임베딩 비활성화")
                 return False
-            
+
+            # 새 파일만 필터링
+            new_files = sorted([f for f in files if f not in self._processed_files], key=_priority)
+            if limit:
+                new_files = new_files[:limit]
+
             self._is_running = True
             self._should_stop = False
             self._status_callback = status_callback
             self._file_provider = file_provider
             self._limit = limit
-        
-        # 새 파일만 필터링
-        new_files = sorted([f for f in files if f not in self._processed_files], key=_priority)
-        if limit:
-            new_files = new_files[:limit]
+            self._state = "scanning"
+            self._source_total = len(files)
+            self._processable_total = len(new_files)
+            self._current_index = 0
+            self._remaining_count = len(new_files)
+            self._current_file = "파일 확인 중"
+            self._last_status_updated_at = time.time()
         print(f"[Embedder] {len(new_files)} new files to process (skipping {len(files) - len(new_files)} processed)")
         
         if not new_files and file_provider is None:
-            self._is_running = False
+            with self._lock:
+                self._is_running = False
+            self._update_state(state="completed", current_file="", processable_total=0, remaining_count=0)
             return False
         
         self._thread = threading.Thread(target=self._embedding_loop, args=(new_files,), daemon=True)
@@ -526,30 +637,40 @@ class BackgroundEmbedder:
     
     def stop(self) -> None:
         """임베딩 중지"""
-        self._should_stop = True
+        with self._lock:
+            self._should_stop = True
+        self._update_state(state="stopped")
         print("[Embedder] Stop requested")
     
     def is_running(self) -> bool:
         """실행 중인지 확인"""
-        return self._is_running
+        with self._lock:
+            return self._is_running
     
     def get_status(self) -> dict:
         """현재 상태 반환"""
-        extension_stats = {ext: dict(counter) for ext, counter in self._extension_stats.items()}
-        return {
-            "is_running": self._is_running,
-            "processed_count": self._processed_count,
-            "skip_count": self._skip_count,
-            "error_count": self._error_count,
-            "current_file": self._current_file,
-            "last_error": self._last_error,
-            "consecutive_load_failures": self._consecutive_load_failures,
-            "backoff_until": self._backoff_until,
-            "embedding_disabled_for_session": self._embedding_disabled_for_session,
-            "last_vectorstore_error": self._last_vectorstore_error,
-            "total_processed": len(self._processed_files),
-            "extension_stats": extension_stats
-        }
+        with self._lock:
+            extension_stats = {ext: dict(counter) for ext, counter in self._extension_stats.items()}
+            return {
+                "is_running": self._is_running,
+                "processed_count": self._processed_count,
+                "skip_count": self._skip_count,
+                "error_count": self._error_count,
+                "current_file": self._current_file,
+                "last_error": self._last_error,
+                "consecutive_load_failures": self._consecutive_load_failures,
+                "backoff_until": self._backoff_until,
+                "embedding_disabled_for_session": self._embedding_disabled_for_session,
+                "last_vectorstore_error": self._last_vectorstore_error,
+                "total_processed": len(self._processed_files),
+                "extension_stats": extension_stats,
+                "state": self._state,
+                "source_total": self._source_total,
+                "processable_total": self._processable_total,
+                "current_index": self._current_index,
+                "remaining_count": self._remaining_count,
+                "last_status_updated_at": self._last_status_updated_at,
+            }
     
     def process_single_file_synchronous(self, filepath: str) -> bool:
         """

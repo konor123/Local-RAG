@@ -74,6 +74,10 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "max_index_mb_for_eager_load": 2048,
         "max_file_size_mb": 200,
     },
+    "metadata_index": {
+        "enabled": False,
+        "path": "%LOCALAPPDATA%/OSL AI Assistant/metadata_index.sqlite3",
+    },
     "vector": {
         "backend": "turbovec",
         "index_dir": "%LOCALAPPDATA%/OSL AI Assistant/turbovec_index",
