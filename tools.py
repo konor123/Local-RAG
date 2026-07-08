@@ -723,6 +723,48 @@ def search_content(query: str, k: int = 4) -> Dict:
         return {"error": f"RAG 검색 오류: {str(e)}"}
 
 
+def search_metadata_content(query: str, k: int = 5) -> Dict:
+    """Search the optional SQLite/FTS5 sidecar without replacing vector search.
+
+    This is an architecture Phase 4 validation path. It is disabled by default
+    and should be used side-by-side with vector search until quality is proven.
+    """
+    try:
+        from config_manager import load_config
+
+        cfg = load_config().get("metadata_index", {})
+        if not cfg.get("enabled", False) or not cfg.get("fts_search_enabled", False):
+            return {"query": query, "count": 0, "results": [], "sources": [], "disabled": True}
+
+        from sqlite_index import search_fts
+
+        rows = search_fts(query, k=k, db_path=cfg.get("path"))
+        results = []
+        sources = []
+        seen_sources = set()
+        for row in rows:
+            source = row.get("source", "")
+            if source and source not in seen_sources:
+                sources.append(source)
+                seen_sources.add(source)
+            results.append({
+                "content": row.get("content", "")[:500],
+                "source": source,
+                "metadata": row.get("metadata", {}),
+                "score": row.get("score", 0),
+                "source_engine": "sqlite_fts5",
+            })
+        return {
+            "query": query,
+            "count": len(results),
+            "results": results,
+            "sources": sources,
+            "source": "sqlite_fts5",
+        }
+    except Exception as e:
+        return {"error": f"SQLite FTS 검색 오류: {str(e)}", "query": query, "count": 0, "results": [], "sources": []}
+
+
 def search_hybrid(query: str, k: int = 5) -> Dict:
     """Filename/path search and vector content search fused with RRF."""
     try:

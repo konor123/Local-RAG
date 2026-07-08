@@ -76,6 +76,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     },
     "metadata_index": {
         "enabled": False,
+        "fts_search_enabled": False,
         "path": "%LOCALAPPDATA%/OSL AI Assistant/metadata_index.sqlite3",
     },
     "vector": {

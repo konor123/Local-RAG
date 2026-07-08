@@ -49,6 +49,46 @@ class SQLiteIndexTests(unittest.TestCase):
         self.assertEqual(row[0], "empty_or_encrypted")
         self.assertEqual(row[1], "password")
 
+    def test_tools_metadata_search_is_disabled_by_default(self):
+        import tools
+
+        result = tools.search_metadata_content("alarm", k=3)
+
+        self.assertTrue(result["disabled"])
+        self.assertEqual(result["count"], 0)
+
+    def test_tools_metadata_search_uses_configured_fts_sidecar(self):
+        import tools
+        import sqlite_index
+        import config_manager
+
+        original_load_config = config_manager.load_config
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "metadata.sqlite3")
+            source = os.path.join(tmpdir, "manual.txt")
+            with open(source, "w", encoding="utf-8") as f:
+                f.write("fixture")
+            sqlite_index.upsert_chunks(
+                source,
+                [{"content": "sprinkler alarm checklist", "metadata": {"page": 4}}],
+                db_path=db_path,
+            )
+            config_manager.load_config = lambda: {
+                "metadata_index": {
+                    "enabled": True,
+                    "fts_search_enabled": True,
+                    "path": db_path,
+                }
+            }
+            try:
+                result = tools.search_metadata_content("sprinkler", k=3)
+            finally:
+                config_manager.load_config = original_load_config
+
+        self.assertEqual(result["source"], "sqlite_fts5")
+        self.assertEqual(result["count"], 1)
+        self.assertEqual(result["results"][0]["metadata"]["page"], 4)
+
 
 if __name__ == "__main__":
     unittest.main()
