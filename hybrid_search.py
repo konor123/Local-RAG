@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
-"""Hybrid search over existing filename and vector search paths.
+"""Hybrid search over filename, vector, and optional SQLite FTS paths.
 
-This first iteration does not introduce user-facing search operators or SQLite
-FTS. It only normalizes current results and fuses them with RRF.
+No user-facing search operators are introduced. SQLite FTS remains config-gated
+and participates only when the Phase 4 sidecar is explicitly enabled.
 """
 from __future__ import annotations
 
@@ -67,6 +67,28 @@ def _search_content_with_timeout(query: str, k: int, timeout: int = 60) -> Dict:
     return result_box.get("result", {"query": query, "count": 0, "results": [], "sources": []})
 
 
+def _search_metadata_with_timeout(query: str, k: int, timeout: int = 15) -> Dict:
+    from tools import search_metadata_content
+
+    result_box: Dict = {}
+
+    def _run():
+        try:
+            result_box["result"] = search_metadata_content(query, k=k)
+        except Exception as e:
+            result_box["error"] = str(e)
+
+    thread = threading.Thread(target=_run, daemon=True)
+    thread.start()
+    thread.join(timeout=timeout)
+
+    if thread.is_alive():
+        return {"error": f"FTS 검색 시간 초과({timeout}초)", "query": query, "count": 0, "results": [], "sources": []}
+    if "error" in result_box:
+        return {"error": result_box["error"], "query": query, "count": 0, "results": [], "sources": []}
+    return result_box.get("result", {"query": query, "count": 0, "results": [], "sources": []})
+
+
 def hybrid_search(query: str, k: int = 5, file_limit: int = 20) -> Dict:
     from tools import search_files
 
@@ -87,10 +109,15 @@ def hybrid_search(query: str, k: int = 5, file_limit: int = 20) -> Dict:
             break
     file_result = {"count": len(merged_file_items), "results": merged_file_items}
     content_result = _search_content_with_timeout(query, k=k)
+    metadata_result = _search_metadata_with_timeout(query, k=k)
 
     file_results = normalize_file_results(file_result, limit=file_limit)
     content_results = normalize_content_results(content_result, limit=max(k, file_limit))
-    fused = reciprocal_rank_fusion([file_results, content_results], limit=k)
+    metadata_results = normalize_content_results(metadata_result, limit=max(k, file_limit))
+    ranked_lists = [file_results, content_results]
+    if metadata_results:
+        ranked_lists.append(metadata_results)
+    fused = reciprocal_rank_fusion(ranked_lists, limit=k)
 
     sources = []
     seen = set()
@@ -108,5 +135,7 @@ def hybrid_search(query: str, k: int = 5, file_limit: int = 20) -> Dict:
         "components": {
             "file_count": component_file_count,
             "content_count": content_result.get("count", 0) if isinstance(content_result, dict) else 0,
+            "metadata_count": metadata_result.get("count", 0) if isinstance(metadata_result, dict) else 0,
+            "metadata_disabled": bool(metadata_result.get("disabled", False)) if isinstance(metadata_result, dict) else False,
         },
     }

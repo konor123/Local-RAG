@@ -66,6 +66,7 @@ class HybridSearchTests(unittest.TestCase):
 
         original_search_files = tools.search_files
         original_search_content = tools.search_content
+        original_search_metadata_content = tools.search_metadata_content
         tools.search_files = lambda pattern, sort_by="date_newest": {
             "count": 1,
             "results": [{"name": "shared.pdf", "path": "C:/docs/shared.pdf"}],
@@ -75,11 +76,13 @@ class HybridSearchTests(unittest.TestCase):
             "results": [{"content": "검색된 본문", "source": "C:/docs/shared.pdf", "metadata": {}, "score": 0.9}],
             "sources": ["C:/docs/shared.pdf"],
         }
+        tools.search_metadata_content = lambda query, k=5: {"count": 0, "results": [], "sources": [], "disabled": True}
         try:
             result = hybrid_search("shared", k=3)
         finally:
             tools.search_files = original_search_files
             tools.search_content = original_search_content
+            tools.search_metadata_content = original_search_metadata_content
 
         self.assertEqual(result["source"], "hybrid_rrf")
         self.assertEqual(result["count"], 1)
@@ -93,16 +96,52 @@ class HybridSearchTests(unittest.TestCase):
         seen_patterns = []
         original_search_files = tools.search_files
         original_search_content = tools.search_content
+        original_search_metadata_content = tools.search_metadata_content
         tools.search_files = lambda pattern, sort_by="date_newest": seen_patterns.append(pattern) or {"count": 0, "results": []}
         tools.search_content = lambda query, k=5: {"count": 0, "results": [], "sources": []}
+        tools.search_metadata_content = lambda query, k=5: {"count": 0, "results": [], "sources": [], "disabled": True}
         try:
             hybrid_search("유도등 카탈로그 내용 요약해줘", k=3)
         finally:
             tools.search_files = original_search_files
             tools.search_content = original_search_content
+            tools.search_metadata_content = original_search_metadata_content
 
         self.assertIn("*유도등*카탈로그*", seen_patterns)
         self.assertNotIn("*유도등 카탈로그 내용 요약해줘*", seen_patterns)
+
+    def test_hybrid_search_includes_configured_metadata_fts_results(self):
+        import tools
+        from hybrid_search import hybrid_search
+
+        original_search_files = tools.search_files
+        original_search_content = tools.search_content
+        original_search_metadata_content = tools.search_metadata_content
+        tools.search_files = lambda pattern, sort_by="date_newest": {"count": 0, "results": []}
+        tools.search_content = lambda query, k=5: {"count": 0, "results": [], "sources": []}
+        tools.search_metadata_content = lambda query, k=5: {
+            "count": 1,
+            "results": [{
+                "content": "FTS 본문",
+                "source": "C:/docs/fts.pdf",
+                "metadata": {"page": 2},
+                "score": -0.5,
+                "source_engine": "sqlite_fts5",
+            }],
+            "sources": ["C:/docs/fts.pdf"],
+            "source": "sqlite_fts5",
+        }
+        try:
+            result = hybrid_search("fts", k=3)
+        finally:
+            tools.search_files = original_search_files
+            tools.search_content = original_search_content
+            tools.search_metadata_content = original_search_metadata_content
+
+        self.assertEqual(result["count"], 1)
+        self.assertEqual(result["components"]["metadata_count"], 1)
+        self.assertEqual(result["results"][0]["source_engine"], "sqlite_fts5")
+        self.assertEqual(result["sources"], ["C:/docs/fts.pdf"])
 
 
 if __name__ == "__main__":
