@@ -364,7 +364,13 @@ def _synthesize_answer(question: str, execution_results: List[Dict], chat_histor
                 
                 # 소스 메타데이터
                 for r in res.get("results", [])[:5]:
-                    source_info.append({"source": r.get("path"), "type": "file"})
+                    source_info.append({
+                        "source": r.get("path"),
+                        "type": "file",
+                        "source_engine": r.get("source_engine", "filename"),
+                        "score": r.get("score"),
+                        "metadata": r.get("metadata", {}),
+                    })
 
         elif data.get("type") in ("content", "hybrid"):
             count = res.get("count", 0)
@@ -377,7 +383,14 @@ def _synthesize_answer(question: str, execution_results: List[Dict], chat_histor
                 
                 # 소스 메타데이터
                 for d in res.get("results", [])[:4]:
-                    source_info.append({"source": d.get("source"), "type": "content"})
+                    source_info.append({
+                        "source": d.get("source"),
+                        "type": "content",
+                        "source_engine": d.get("source_engine", "vector"),
+                        "score": d.get("score"),
+                        "metadata": d.get("metadata", {}),
+                        "snippet": d.get("content", "")[:300],
+                    })
 
     if not context_parts:
         yield {

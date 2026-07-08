@@ -258,6 +258,62 @@ def _markdown_to_html(text: str) -> str:
     return merged
 
 
+def _format_source_badge(source_engine: str) -> str:
+    labels = {
+        "filename": "파일명",
+        "vector": "벡터",
+        "sqlite_fts5": "FTS5",
+        "hybrid_rrf": "하이브리드",
+    }
+    return labels.get(source_engine or "", source_engine or "unknown")
+
+
+def _format_score(value) -> str:
+    try:
+        return f"{float(value):.3f}"
+    except (TypeError, ValueError):
+        return ""
+
+
+def _metadata_summary(metadata: dict) -> str:
+    if not isinstance(metadata, dict):
+        return ""
+    parts = []
+    for key in ("page", "sheet", "file_type"):
+        value = metadata.get(key)
+        if value not in (None, ""):
+            parts.append(f"{key}: {_escape(str(value))}")
+    return " · ".join(parts)
+
+
+def _source_card_html(src: dict) -> str:
+    path = src.get("source") or ""
+    if not path:
+        return ""
+    href = ChatBrowser.encode_path(path)
+    filename = os.path.basename(path) or path
+    engine = _format_source_badge(src.get("source_engine", src.get("type", "unknown")))
+    score = _format_score(src.get("score"))
+    metadata_text = _metadata_summary(src.get("metadata", {}))
+    snippet = str(src.get("snippet") or "").strip().replace("\n", " ")[:180]
+    detail_bits = [f"<span>{_escape(engine)}</span>"]
+    if score:
+        detail_bits.append(f"<span>score: {_escape(score)}</span>")
+    if metadata_text:
+        detail_bits.append(f"<span>{metadata_text}</span>")
+    detail = " · ".join(detail_bits)
+    snippet_html = f'<div style="color:#cbd5e1;margin-top:4px;font-size:12px">{_escape(snippet)}</div>' if snippet else ""
+    return (
+        '<div style="border:1px solid #334155;background:#0f172a;'
+        'border-radius:6px;padding:8px;margin:6px 0">'
+        f'<a href="{href}" style="color:#60a5fa;text-decoration:underline;font-weight:bold">📂 {_escape(filename)}</a>'
+        f'<div style="color:#94a3b8;font-size:11px;margin-top:2px">{detail}</div>'
+        f'<div style="color:#64748b;font-size:11px;margin-top:2px">{_escape(path)}</div>'
+        f'{snippet_html}'
+        '</div>'
+    )
+
+
 # ─── File system helpers ───────────────────────────────
 def _open_path(path: str) -> None:
     """Open a file or folder in the OS default handler."""
@@ -678,6 +734,18 @@ class ChatWindow(QMainWindow):
         update_action.triggered.connect(lambda: self.check_for_updates(silent=False))
         menu.addAction(update_action)
         menu.addSeparator()
+        metadata = load_config().get("metadata_index", {})
+        self._metadata_action = QAction("SQLite 사이드카 사용", self)
+        self._metadata_action.setCheckable(True)
+        self._metadata_action.setChecked(bool(metadata.get("enabled", False)))
+        self._metadata_action.toggled.connect(self._toggle_metadata_index)
+        menu.addAction(self._metadata_action)
+        self._metadata_fts_action = QAction("SQLite FTS 검색 사용", self)
+        self._metadata_fts_action.setCheckable(True)
+        self._metadata_fts_action.setChecked(bool(metadata.get("fts_search_enabled", False)))
+        self._metadata_fts_action.toggled.connect(self._toggle_metadata_fts)
+        menu.addAction(self._metadata_fts_action)
+        menu.addSeparator()
         self._startup_action = QAction("시스템 시작 시 실행", self)
         self._startup_action.setCheckable(True)
         self._startup_action.setChecked(self._startup_initial_state())
@@ -722,6 +790,30 @@ class ChatWindow(QMainWindow):
         config = load_config()
         native = config.setdefault("native_ui", {})
         native["start_with_system"] = checked
+        save_config(config)
+
+    def _toggle_metadata_index(self, checked: bool) -> None:
+        config = load_config()
+        metadata = config.setdefault("metadata_index", {})
+        metadata["enabled"] = checked
+        if not checked:
+            metadata["fts_search_enabled"] = False
+            if hasattr(self, "_metadata_fts_action"):
+                self._metadata_fts_action.blockSignals(True)
+                self._metadata_fts_action.setChecked(False)
+                self._metadata_fts_action.blockSignals(False)
+        save_config(config)
+
+    def _toggle_metadata_fts(self, checked: bool) -> None:
+        config = load_config()
+        metadata = config.setdefault("metadata_index", {})
+        metadata["fts_search_enabled"] = checked
+        if checked and not metadata.get("enabled", False):
+            metadata["enabled"] = True
+            if hasattr(self, "_metadata_action"):
+                self._metadata_action.blockSignals(True)
+                self._metadata_action.setChecked(True)
+                self._metadata_action.blockSignals(False)
         save_config(config)
 
     def _update_tray_status(self) -> None:
@@ -893,14 +985,7 @@ class ChatWindow(QMainWindow):
             html_parts.append('<div style="margin:6px 0 10px 14px">')
             html_parts.append('<b style="color:#94a3b8">📎 참조 파일</b><br>')
             for src in sources:
-                path = src.get("source") or ""
-                if not path:
-                    continue
-                href = ChatBrowser.encode_path(path)
-                display = _escape(path)
-                html_parts.append(
-                    f'<a href="{href}" style="color:#60a5fa;text-decoration:underline">📂 {display}</a><br>'
-                )
+                html_parts.append(_source_card_html(src))
             html_parts.append("</div>")
         self.chat_view.append("".join(html_parts))
 

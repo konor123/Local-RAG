@@ -80,6 +80,13 @@ python sqlite3 FTS5: OK
 
 SQLite should initially hold document/chunk/status metadata and support lexical search. It must not replace JSONL/FAISS until side-by-side validation passes.
 
+Current v1.4.0 preparation status:
+
+- SQLite sidecar schema, status/chunk writes, FTS search, and hybrid RRF participation are implemented behind config flags.
+- Bulk ingest and background embedding use best-effort sidecar writes so SQLite failures do not break vector indexing.
+- Side-by-side validation is available through `scripts/validate_sidecar.py`.
+- SQLite remains opt-in and is not authoritative.
+
 ### Phase 5: source evidence UX
 
 Show stronger source cards: filename, path, snippet, score, source engine, page/sheet metadata where available, and open-file/open-folder actions.

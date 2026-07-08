@@ -89,6 +89,28 @@ class SQLiteIndexTests(unittest.TestCase):
         self.assertEqual(result["count"], 1)
         self.assertEqual(result["results"][0]["metadata"]["page"], 4)
 
+    def test_stats_and_wal_checkpoint(self):
+        import sqlite_index
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "metadata.sqlite3")
+            source = os.path.join(tmpdir, "manual.txt")
+            with open(source, "w", encoding="utf-8") as f:
+                f.write("fixture")
+            sqlite_index.upsert_chunks(
+                source,
+                [{"content": "alarm guide", "metadata": {}}, {"content": "pump guide", "metadata": {}}],
+                db_path=db_path,
+            )
+
+            stats = sqlite_index.get_stats(db_path)
+            checkpoint = sqlite_index.checkpoint_wal(db_path)
+
+        self.assertEqual(stats["documents"], 1)
+        self.assertEqual(stats["chunks"], 2)
+        self.assertEqual(stats["fts_chunks"], 2)
+        self.assertIn("busy", checkpoint)
+
 
 if __name__ == "__main__":
     unittest.main()

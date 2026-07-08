@@ -233,6 +233,35 @@ def search_fts(query: str, k: int = 5, db_path: Optional[str] = None) -> List[Di
     return results
 
 
+def get_stats(db_path: Optional[str] = None) -> Dict[str, int]:
+    """Return lightweight sidecar table counts for diagnostics/UI."""
+    init_db(db_path)
+    with closing(_connect(db_path)) as conn:
+        row = conn.execute(
+            """
+            SELECT
+                (SELECT COUNT(*) FROM documents) AS documents,
+                (SELECT COUNT(*) FROM chunks) AS chunks,
+                (SELECT COUNT(*) FROM chunks_fts) AS fts_chunks,
+                (SELECT COUNT(*) FROM index_events) AS index_events
+            """
+        ).fetchone()
+    return {key: int(row[key] or 0) for key in row.keys()}
+
+
+def checkpoint_wal(db_path: Optional[str] = None, truncate: bool = True) -> Dict[str, int]:
+    """Checkpoint the SQLite WAL file to keep long indexing sessions bounded."""
+    init_db(db_path)
+    mode = "TRUNCATE" if truncate else "PASSIVE"
+    with closing(_connect(db_path)) as conn:
+        row = conn.execute(f"PRAGMA wal_checkpoint({mode})").fetchone()
+    return {
+        "busy": int(row[0] or 0),
+        "log_frames": int(row[1] or 0),
+        "checkpointed_frames": int(row[2] or 0),
+    }
+
+
 def safe_record_status(source_path: str, status: str, detail: str = "") -> None:
     if not is_enabled():
         return
@@ -249,3 +278,12 @@ def safe_upsert_chunks(source_path: str, chunks: Iterable[Dict], status: str = "
         upsert_chunks(source_path, chunks, status=status)
     except Exception as exc:
         print(f"[SQLiteIndex] chunk write skipped: {exc}")
+
+
+def safe_checkpoint_wal() -> None:
+    if not is_enabled():
+        return
+    try:
+        checkpoint_wal()
+    except Exception as exc:
+        print(f"[SQLiteIndex] WAL checkpoint skipped: {exc}")

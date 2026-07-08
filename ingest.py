@@ -506,6 +506,41 @@ def record_index_status(file_path: str, status: str, detail: str = ""):
                 "file": file_path,
                 "detail": detail[:300]
             })
+    try:
+        from sqlite_index import safe_record_status
+
+        safe_record_status(file_path, status, detail)
+    except Exception:
+        pass
+
+
+def record_sidecar_chunks_by_source(vector_docs: List[Dict[str, Any]]) -> None:
+    try:
+        from sqlite_index import safe_upsert_chunks
+    except Exception:
+        return
+    grouped: Dict[str, List[Dict[str, Any]]] = {}
+    for doc in vector_docs or []:
+        source = doc.get("source") or doc.get("metadata", {}).get("source") or "Unknown"
+        if not source or source == "Unknown":
+            continue
+        grouped.setdefault(source, []).append({
+            "content": doc.get("content", ""),
+            "metadata": doc.get("metadata", {}),
+        })
+    for source, chunks in grouped.items():
+        safe_upsert_chunks(source, chunks, status=STATUS_OK)
+
+
+def checkpoint_sidecar_if_needed(count: int, every: int = 100) -> None:
+    if count <= 0 or count % every != 0:
+        return
+    try:
+        from sqlite_index import safe_checkpoint_wal
+
+        safe_checkpoint_wal()
+    except Exception:
+        pass
 
 def summarize_extension_stats(max_exts: int = 12) -> str:
     with stats_lock:
@@ -1203,11 +1238,11 @@ def ingest_data():
                 
             sources, ids, embeddings, metadatas, texts = item
             vector_write_success = False
+            vector_docs = []
             
             if ids:
                 try:
                     # VectorStore bulk indexing
-                    vector_docs = []
                     for i, text in enumerate(texts):
                         if embeddings[i] is None or len(embeddings[i]) == 0:
                             continue
@@ -1221,6 +1256,7 @@ def ingest_data():
                     if vector_docs and INDEX_SAMPLE_WRITE:
                         add_documents(vector_docs)
                         save_index()
+                        record_sidecar_chunks_by_source(vector_docs)
                         vector_write_success = True
                     elif vector_docs:
                         print(f"   [Writer] Sample report-only: skipped vector write for {len(vector_docs)} chunks")
@@ -1242,6 +1278,7 @@ def ingest_data():
                 
                 if unique_to_save and INDEX_SAMPLE_WRITE:
                     append_processed_files(unique_to_save)
+                    checkpoint_sidecar_if_needed(len(existing_sources))
                 
             vector_queue.task_done()
         print("   [Writer] Finished.")
