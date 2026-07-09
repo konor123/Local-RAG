@@ -65,6 +65,13 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "file_first": True,
         "file_search_sufficient_count": 1,
         "max_jit_files": 5,
+        "ocr": {
+            "enabled": True,
+            "auto_on_direct_read": True,
+            "preload_on_startup": True,
+            "direct_read_ocr_timeout_sec": 45,
+            "direct_read_ocr_max_pages": 20,
+        },
     },
     "embedding": {
         "enabled": True,
@@ -75,8 +82,8 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "max_file_size_mb": 200,
     },
     "metadata_index": {
-        "enabled": False,
-        "fts_search_enabled": False,
+        "enabled": True,
+        "fts_search_enabled": True,
         "path": "%LOCALAPPDATA%/OSL AI Assistant/metadata_index.sqlite3",
     },
     "vector": {
@@ -133,13 +140,46 @@ def _merge_defaults(user_config: Dict[str, Any], defaults: Dict[str, Any]) -> Di
     return merged
 
 
+def _enforce_internal_defaults(config: Dict[str, Any]) -> tuple[Dict[str, Any], bool]:
+    """Apply v1.4.4 internal defaults that are no longer user-toggleable."""
+    changed = False
+    metadata = config.setdefault("metadata_index", {})
+    if metadata.get("enabled") is not True:
+        metadata["enabled"] = True
+        changed = True
+    if metadata.get("fts_search_enabled") is not True:
+        metadata["fts_search_enabled"] = True
+        changed = True
+    if not metadata.get("path"):
+        metadata["path"] = DEFAULT_CONFIG["metadata_index"]["path"]
+        changed = True
+
+    search = config.setdefault("search", {})
+    ocr_defaults = DEFAULT_CONFIG.get("search", {}).get("ocr", {})
+    ocr_config = search.setdefault("ocr", {})
+    for key, value in ocr_defaults.items():
+        if key not in ocr_config:
+            ocr_config[key] = value
+            changed = True
+    return config, changed
+
+
 def load_config() -> Dict[str, Any]:
     path = _config_path()
     if not path.exists():
-        return deepcopy(DEFAULT_CONFIG)
+        config, _ = _enforce_internal_defaults(deepcopy(DEFAULT_CONFIG))
+        return config
     try:
         with path.open("r", encoding="utf-8") as f:
-            return _merge_defaults(json.load(f), DEFAULT_CONFIG)
+            merged = _merge_defaults(json.load(f), DEFAULT_CONFIG)
+        merged, changed = _enforce_internal_defaults(merged)
+        if changed:
+            try:
+                with path.open("w", encoding="utf-8") as out:
+                    json.dump(merged, out, ensure_ascii=False, indent=2)
+            except Exception as save_exc:
+                print(f"[Config] Failed to persist v1.4.4 defaults: {save_exc}")
+        return merged
     except Exception as exc:
         print(f"[Config] Failed to load config, using defaults: {exc}")
         return deepcopy(DEFAULT_CONFIG)

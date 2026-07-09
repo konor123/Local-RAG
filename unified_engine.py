@@ -6,6 +6,7 @@ Flow: Query -> Planner (LLM) -> Parallel Execution -> Synthesis -> Answer
 """
 import json
 import os
+import queue
 import threading
 from typing import Dict, Generator, List, Any
 from concurrent.futures import ThreadPoolExecutor
@@ -40,6 +41,40 @@ def _positive_int(value: Any, default: int) -> int:
     except (TypeError, ValueError):
         return default
     return parsed if parsed > 0 else default
+
+
+def _ocr_config() -> Dict:
+    return _search_config().get("ocr", {})
+
+
+def _ocr_pdf_for_direct_read(path: str, config: Dict) -> Dict:
+    timeout = _positive_int(config.get("direct_read_ocr_timeout_sec"), 45)
+    max_pages = _positive_int(config.get("direct_read_ocr_max_pages"), 20)
+    result_queue: "queue.Queue[Dict]" = queue.Queue(maxsize=1)
+
+    def _run() -> None:
+        try:
+            from ocr_utils import ocr_pdf_pages
+
+            page_numbers = range(1, max_pages + 1)
+            pages = ocr_pdf_pages(path, page_numbers=page_numbers)
+            text = "\n\n".join(page.text for page in pages if getattr(page, "text", ""))
+            errors = [page.error for page in pages if getattr(page, "error", None)]
+            result_queue.put({"success": bool(text.strip()), "content": text.strip(), "errors": errors}, block=False)
+        except Exception as exc:
+            try:
+                result_queue.put({"success": False, "content": "", "errors": [str(exc)]}, block=False)
+            except Exception:
+                pass
+
+    # NOTE: A timeout here can orphan this daemon thread, but query
+    # processing is bounded and sequential so no resource leak occurs.
+    thread = threading.Thread(target=_run, daemon=True)
+    thread.start()
+    try:
+        return result_queue.get(timeout=timeout)
+    except queue.Empty:
+        return {"success": False, "content": "", "errors": [f"OCR timeout after {timeout}s"]}
 
 
 def _significant_tokens(text: str) -> List[str]:
@@ -465,6 +500,32 @@ def _execute_sub_query_streaming(sub_query: Dict, allow_jit: bool = True) -> Gen
                         file_result["direct_read"] = by_path[path]
                 ok_count = sum(1 for r in direct_results if r.get("success"))
                 yield ({"type": "thinking", "content": f"✅ 직접 열람 완료: {ok_count}/{len(direct_results)}개 파일에서 텍스트 추출"}, None)
+
+                ocr_cfg = _ocr_config()
+                if ocr_cfg.get("enabled", True) and ocr_cfg.get("auto_on_direct_read", True):
+                    ocr_targets = [r for r in direct_results if r.get("ocr_needed") and r.get("path")]
+                    if ocr_targets:
+                        yield ({"type": "thinking", "content": "PDF에서 텍스트를 찾지 못해 OCR 엔진으로 읽는 중입니다..."}, None)
+                    for direct in ocr_targets:
+                        path = direct.get("path")
+                        fname = os.path.basename(path or "PDF")
+                        yield ({"type": "thinking", "content": f"🔎 OCR 엔진으로 읽는 중: {fname}"}, None)
+                        ocr_result = _ocr_pdf_for_direct_read(path, ocr_cfg)
+                        if ocr_result.get("success"):
+                            direct["content"] = ocr_result.get("content", "")
+                            direct["success"] = True
+                            direct["category"] = "ok"
+                            direct["detail"] = ""
+                            direct["ocr_applied"] = True
+                            direct["ocr_needed"] = False
+                            direct["source_engine"] = "ocr_direct_read"
+                            yield ({"type": "thinking", "content": f"✅ OCR 완료: {fname}"}, None)
+                        else:
+                            errors = ocr_result.get("errors") or ["OCR failed"]
+                            detail = str(errors[0])[:200]
+                            direct["category"] = "ocr_error" if "timeout" not in detail.lower() else "timeout"
+                            direct["detail"] = detail
+                            yield ({"type": "thinking", "content": f"⚠️ OCR 처리에 실패해 추출 가능한 내용만 사용합니다: {fname} ({detail})"}, None)
             
         elif q_type == 'content':
             # 내용 검색
@@ -573,7 +634,8 @@ def _synthesize_answer(question: str, execution_results: List[Dict], chat_histor
                         remaining = max(0, direct_context_chars - used_direct_chars)
                         snippet = str(direct.get("content") or "")[: min(per_file_context_chars, remaining)]
                         used_direct_chars += len(snippet)
-                        line += f"\n[직접 열람 내용]\n{snippet}"
+                        label = "직접 열람 내용 (OCR)" if direct.get("ocr_applied") else "직접 열람 내용"
+                        line += f"\n[{label}]\n{snippet}"
                     elif direct:
                         category = direct.get("category") or "unknown_error"
                         detail = direct.get("detail") or ""

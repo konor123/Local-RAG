@@ -73,6 +73,7 @@ class UnifiedOrchestrationTests(unittest.TestCase):
         self.original_background_embedder = self.engine.BackgroundEmbedder
         self.original_load_config = self.engine.load_config
         self.original_get_provider = self.engine.get_provider
+        self.original_ocr_pdf_for_direct_read = self.engine._ocr_pdf_for_direct_read
         self.logged = []
         self.engine.conversation_logger.log_interaction = lambda **kwargs: self.logged.append(kwargs)
 
@@ -88,6 +89,7 @@ class UnifiedOrchestrationTests(unittest.TestCase):
         self.engine.BackgroundEmbedder = self.original_background_embedder
         self.engine.load_config = self.original_load_config
         self.engine.get_provider = self.original_get_provider
+        self.engine._ocr_pdf_for_direct_read = self.original_ocr_pdf_for_direct_read
 
     def test_direct_mode_returns_answer_without_tools(self):
         called_tools = []
@@ -232,6 +234,48 @@ class UnifiedOrchestrationTests(unittest.TestCase):
 
         self.assertEqual(data["result"]["results"][0]["direct_read"]["source_engine"], "direct_read")
         self.assertIn("900101", data["result"]["results"][0]["direct_read"]["content"])
+
+    def test_file_query_auto_ocrs_when_direct_read_needs_ocr(self):
+        self.engine.load_config = lambda: {
+            "search": {
+                "enable_query_time_direct_read_fallback": True,
+                "max_jit_files": 0,
+                "ocr": {"enabled": True, "auto_on_direct_read": True, "direct_read_ocr_timeout_sec": 5, "direct_read_ocr_max_pages": 2},
+            }
+        }
+        self.engine.search_files = lambda query, sort_by="date_newest": {
+            "query": query,
+            "count": 1,
+            "results": [{"path": "C:/docs/scan.pdf", "name": "scan.pdf"}],
+        }
+        self.engine.direct_read_candidates = lambda results, config=None: [{
+            "success": False,
+            "path": "C:/docs/scan.pdf",
+            "name": "scan.pdf",
+            "content": "",
+            "source_engine": "direct_read",
+            "category": "no_chunks",
+            "detail": "Loader returned no text",
+            "ocr_needed": True,
+        }]
+        calls = []
+        self.engine._ocr_pdf_for_direct_read = lambda path, cfg: calls.append((path, cfg)) or {
+            "success": True,
+            "content": "OCR로 읽은 주민등록번호 900101-1234567",
+            "errors": [],
+        }
+
+        outputs = list(self.engine._execute_sub_query_streaming({"type": "file", "query": "*scan*"}, allow_jit=False))
+        data = outputs[-1][1]
+        direct = data["result"]["results"][0]["direct_read"]
+        thinking = [event[0]["content"] for event in outputs if event[0] and event[0].get("type") == "thinking"]
+
+        self.assertEqual(calls[0][0], "C:/docs/scan.pdf")
+        self.assertTrue(direct["success"])
+        self.assertTrue(direct["ocr_applied"])
+        self.assertEqual(direct["source_engine"], "ocr_direct_read")
+        self.assertIn("OCR로 읽은", direct["content"])
+        self.assertTrue(any("OCR 엔진으로 읽는 중" in msg for msg in thinking))
 
     def test_synthesis_includes_direct_read_content_and_source_engine(self):
         captured = {}

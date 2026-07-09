@@ -49,7 +49,28 @@ class SQLiteIndexTests(unittest.TestCase):
         self.assertEqual(row[0], "empty_or_encrypted")
         self.assertEqual(row[1], "password")
 
-    def test_tools_metadata_search_is_disabled_by_default(self):
+    def test_metadata_index_defaults_to_enabled(self):
+        import config_manager
+
+        metadata = config_manager.DEFAULT_CONFIG["metadata_index"]
+
+        self.assertTrue(metadata["enabled"])
+        self.assertTrue(metadata["fts_search_enabled"])
+
+    def test_metadata_index_disabled_config_is_migrated_to_enabled(self):
+        import config_manager
+
+        config, changed = config_manager._enforce_internal_defaults({
+            "metadata_index": {"enabled": False, "fts_search_enabled": False, "path": "custom.sqlite3"},
+            "search": {},
+        })
+
+        self.assertTrue(changed)
+        self.assertTrue(config["metadata_index"]["enabled"])
+        self.assertTrue(config["metadata_index"]["fts_search_enabled"])
+        self.assertEqual(config["metadata_index"]["path"], "custom.sqlite3")
+
+    def test_tools_metadata_search_is_disabled_when_key_absent_for_compatibility(self):
         import tools
         import config_manager
 

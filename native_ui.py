@@ -24,6 +24,7 @@ from PySide6.QtGui import QAction, QCloseEvent, QColor, QIcon, QPainter, QPixmap
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
 from PySide6.QtWidgets import (
     QApplication,
+    QDialog,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -520,6 +521,16 @@ class PreloadWorker(QThread):
 
             embeddings = get_embeddings()
             embeddings.embed_query("워밍업")
+            ocr_cfg = load_config().get("search", {}).get("ocr", {})
+            if ocr_cfg.get("enabled", True) and ocr_cfg.get("preload_on_startup", True):
+                try:
+                    self.status.emit("OCR 엔진을 백그라운드에서 준비 중입니다...")
+                    from ocr_utils import get_ocr
+
+                    get_ocr()
+                    self.status.emit("OCR 엔진 준비 완료")
+                except Exception as ocr_exc:
+                    messages.append(f"OCR 엔진 준비 실패: {ocr_exc}")
             self.status.emit("모델 준비 완료")
         except Exception as exc:
             ok = False
@@ -668,6 +679,86 @@ class BackgroundTaskManager(QObject):
         return f"⚙️ 임베딩: 대기 (누적 {total:,} 처리)"
 
 
+class IndexingStatusDialog(QDialog):
+    """Read-only snapshot of cache, embedding, SQLite, and OCR status."""
+
+    def __init__(self, bg: BackgroundTaskManager, parent=None):
+        super().__init__(parent)
+        self.bg = bg
+        self.setWindowTitle("인덱싱 상태")
+        self.resize(640, 520)
+
+        layout = QVBoxLayout(self)
+        self.text = QTextBrowser(self)
+        self.text.setOpenExternalLinks(False)
+        layout.addWidget(self.text, stretch=1)
+
+        buttons = QHBoxLayout()
+        refresh_btn = QPushButton("새로고침")
+        refresh_btn.clicked.connect(self.refresh)
+        close_btn = QPushButton("닫기")
+        close_btn.clicked.connect(self.close)
+        buttons.addStretch(1)
+        buttons.addWidget(refresh_btn)
+        buttons.addWidget(close_btn)
+        layout.addLayout(buttons)
+        self.refresh()
+
+    def refresh(self) -> None:
+        self.text.setHtml(f"<pre style='font-family:Malgun Gothic, Consolas; font-size:12px'>{html.escape(self._snapshot_text())}</pre>")
+
+    def _snapshot_text(self) -> str:
+        st = self.bg.embedder.get_status()
+        cfg = load_config()
+        metadata = cfg.get("metadata_index", {})
+        ocr_cfg = cfg.get("search", {}).get("ocr", {})
+        backoff_until = float(st.get("backoff_until", 0) or 0)
+        backoff_remaining = max(0, int(backoff_until - time.time())) if backoff_until else 0
+        extension_stats = st.get("extension_stats", {}) or {}
+        ext_lines = []
+        for ext, stats in sorted(extension_stats.items()):
+            if ext == "__total__":
+                continue
+            if isinstance(stats, dict):
+                summary = ", ".join(f"{k}:{v}" for k, v in sorted(stats.items()))
+                ext_lines.append(f"  - {ext}: {summary}")
+        if not ext_lines:
+            ext_lines.append("  - 아직 확장자별 통계가 없습니다.")
+
+        lines = [
+            "[캐시]",
+            f"  상태: {self.bg.cache_text()}",
+            f"  파일 수: {self.bg.cache_manager.get_file_count():,}",
+            f"  갱신 중: {'예' if self.bg.cache_manager.is_refreshing() else '아니오'}",
+            "",
+            "[임베딩/인덱싱]",
+            f"  요약: {self.bg.embed_text()}",
+            f"  상태: {st.get('state', 'unknown')}",
+            f"  현재 파일: {st.get('current_file') or '-'}",
+            f"  진행률: {int(st.get('current_index', 0) or 0):,}/{int(st.get('processable_total', 0) or 0):,}",
+            f"  남은 파일: {int(st.get('remaining_count', 0) or 0):,}",
+            f"  성공/건너뜀/오류: {int(st.get('processed_count', 0) or 0):,} / {int(st.get('skip_count', 0) or 0):,} / {int(st.get('error_count', 0) or 0):,}",
+            f"  누적 처리 파일: {int(st.get('total_processed', 0) or 0):,}",
+            f"  비활성화: {'예' if st.get('embedding_disabled_for_session') else '아니오'}",
+            f"  재시도 대기: {backoff_remaining}초" if backoff_remaining else "  재시도 대기: 없음",
+            f"  마지막 오류: {st.get('last_error') or '-'}",
+            "",
+            "[SQLite/FTS 인덱스]",
+            f"  SQLite sidecar: {'사용' if metadata.get('enabled', True) else '미사용'}",
+            f"  FTS 검색: {'사용' if metadata.get('fts_search_enabled', True) else '미사용'}",
+            f"  경로: {metadata.get('path') or '-'}",
+            "",
+            "[OCR]",
+            f"  직접 열람 OCR: {'사용' if ocr_cfg.get('enabled', True) and ocr_cfg.get('auto_on_direct_read', True) else '미사용'}",
+            f"  시작 시 preload: {'사용' if ocr_cfg.get('preload_on_startup', True) else '미사용'}",
+            f"  PDF당 제한: {ocr_cfg.get('direct_read_ocr_max_pages', 20)}페이지 / {ocr_cfg.get('direct_read_ocr_timeout_sec', 45)}초",
+            "",
+            "[확장자별 처리 통계]",
+            *ext_lines,
+        ]
+        return "\n".join(lines)
+
+
 # ─── Chat window ───────────────────────────────────────
 class ChatWindow(QMainWindow):
     def __init__(self):
@@ -736,18 +827,9 @@ class ChatWindow(QMainWindow):
         update_action.triggered.connect(lambda: self.check_for_updates(silent=False))
         menu.addAction(update_action)
         menu.addSeparator()
-        metadata = load_config().get("metadata_index", {})
-        self._metadata_action = QAction("SQLite 사이드카 사용", self)
-        self._metadata_action.setCheckable(True)
-        self._metadata_action.setChecked(bool(metadata.get("enabled", False)))
-        self._metadata_action.toggled.connect(self._toggle_metadata_index)
-        menu.addAction(self._metadata_action)
-        self._metadata_fts_action = QAction("SQLite FTS 검색 사용", self)
-        self._metadata_fts_action.setCheckable(True)
-        self._metadata_fts_action.setChecked(bool(metadata.get("fts_search_enabled", False)))
-        self._metadata_fts_action.toggled.connect(self._toggle_metadata_fts)
-        menu.addAction(self._metadata_fts_action)
-        menu.addSeparator()
+        indexing_action = QAction("📊 인덱싱 상태", self)
+        indexing_action.triggered.connect(self.show_indexing_status)
+        menu.addAction(indexing_action)
         self._startup_action = QAction("시스템 시작 시 실행", self)
         self._startup_action.setCheckable(True)
         self._startup_action.setChecked(self._startup_initial_state())
@@ -794,35 +876,15 @@ class ChatWindow(QMainWindow):
         native["start_with_system"] = checked
         save_config(config)
 
-    def _toggle_metadata_index(self, checked: bool) -> None:
-        config = load_config()
-        metadata = config.setdefault("metadata_index", {})
-        metadata["enabled"] = checked
-        if not checked:
-            metadata["fts_search_enabled"] = False
-            if hasattr(self, "_metadata_fts_action"):
-                self._metadata_fts_action.blockSignals(True)
-                self._metadata_fts_action.setChecked(False)
-                self._metadata_fts_action.blockSignals(False)
-        save_config(config)
-
-    def _toggle_metadata_fts(self, checked: bool) -> None:
-        config = load_config()
-        metadata = config.setdefault("metadata_index", {})
-        metadata["fts_search_enabled"] = checked
-        if checked and not metadata.get("enabled", False):
-            metadata["enabled"] = True
-            if hasattr(self, "_metadata_action"):
-                self._metadata_action.blockSignals(True)
-                self._metadata_action.setChecked(True)
-                self._metadata_action.blockSignals(False)
-        save_config(config)
-
     def _update_tray_status(self) -> None:
         if hasattr(self, "_cache_action"):
             self._cache_action.setText(self.bg.cache_text())
             self._embed_action.setText(self.bg.embed_text())
             self.tray.setToolTip(f"{self.bg.cache_text()}\n{self.bg.embed_text()}")
+
+    def show_indexing_status(self) -> None:
+        dialog = IndexingStatusDialog(self.bg, self)
+        dialog.exec()
 
     def _check_updates_on_startup(self) -> None:
         auto_update = load_config().get("auto_update", {})
