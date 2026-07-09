@@ -137,6 +137,7 @@ class BackgroundEmbedder:
         self._error_count = 0
         self._current_file = ""
         self._last_error = ""
+        self._last_error_category = ""
         self._state = "disabled" if not bool(_embedding_config().get("enabled", True)) else "idle"
         self._source_total = 0
         self._processable_total = 0
@@ -213,6 +214,18 @@ class BackgroundEmbedder:
         with self._lock:
             self._extension_stats[ext][status] += 1
             self._extension_stats["__total__"][status] += 1
+
+    def _set_last_failure(self, category: str, detail: str) -> None:
+        self._last_error_category = category or "unknown_error"
+        self._last_error = str(detail or "")[:1000]
+
+    def _jit_result(self, filepath: str, success: bool, category: str = "", detail: str = "") -> dict:
+        return {
+            "success": bool(success),
+            "path": filepath,
+            "category": category or ("ok" if success else self._last_error_category or "unknown_error"),
+            "detail": detail if detail else ("" if success else self._last_error),
+        }
     
     def _load_processed_files(self) -> Set[str]:
         """처리된 파일 목록 로드"""
@@ -337,11 +350,13 @@ class BackgroundEmbedder:
         ext = os.path.splitext(filepath)[1].lower()
         if _is_temporary_office_file(filepath):
             self._skip_count += 1
+            self._set_last_failure("temporary_file", "Office temporary lock file")
             self._record_status(filepath, "temporary_file")
             self._record_sidecar_status(filepath, "temporary_file", "Office temporary lock file")
             return False
         if ext not in EMBEDDABLE_EXTENSIONS:
             self._skip_count += 1
+            self._set_last_failure("unsupported_extension", f"Unsupported extension: {ext}")
             self._record_status(filepath, "unsupported_extension")
             self._record_sidecar_status(filepath, "unsupported_extension", f"Unsupported extension: {ext}")
             return False  # 지원하지 않는 확장자 → 무시 (로그 안 남김)
@@ -350,6 +365,7 @@ class BackgroundEmbedder:
         if not os.path.exists(filepath):
             _log.debug(f"SKIP (not found): {filepath}")
             self._skip_count += 1
+            self._set_last_failure("missing_file", "File no longer exists")
             self._record_status(filepath, "missing_file")
             self._record_sidecar_status(filepath, "missing_file", "File no longer exists")
             return False
@@ -362,13 +378,15 @@ class BackgroundEmbedder:
 
             if isinstance(data, dict) and data.get("__loader_error__"):
                 category = data.get("category", "parse_error")
+                detail = data.get('detail', '')
                 if category in ("unsupported_extension", "empty_or_encrypted", "temporary_file"):
                     self._skip_count += 1
                 else:
                     self._error_count += 1
+                self._set_last_failure(category, detail)
                 self._record_status(filepath, category)
-                self._record_sidecar_status(filepath, category, data.get('detail', ''))
-                _log.warning(f"FAIL ({category}): {self._current_file} | {data.get('detail', '')[:100]}")
+                self._record_sidecar_status(filepath, category, detail)
+                _log.warning(f"FAIL ({category}): {self._current_file} | {detail[:100]}")
                 return False
 
             # PDF OCR 보강
@@ -395,6 +413,7 @@ class BackgroundEmbedder:
             if not data:
                 _log.debug(f"SKIP (no chunks): {self._current_file}")
                 self._skip_count += 1
+                self._set_last_failure("no_chunks", "Loader returned no chunks")
                 self._record_status(filepath, "no_chunks")
                 self._record_sidecar_status(filepath, "no_chunks", "Loader returned no chunks")
                 return False
@@ -415,6 +434,7 @@ class BackgroundEmbedder:
             if not vector_docs:
                 _log.debug(f"SKIP (no valid docs): {self._current_file}")
                 self._skip_count += 1
+                self._set_last_failure("no_chunks", "No valid document chunks")
                 self._record_status(filepath, "no_chunks")
                 self._record_sidecar_status(filepath, "no_chunks", "No valid document chunks")
                 return False
@@ -423,6 +443,7 @@ class BackgroundEmbedder:
             if not self._lazy_load_model():
                 _log.error(f"FAIL (model not loaded): {self._current_file}")
                 self._error_count += 1
+                self._set_last_failure("embedding_error", self._last_error)
                 self._record_status(filepath, "embedding_error")
                 self._record_sidecar_status(filepath, "embedding_error", self._last_error)
                 return False
@@ -456,15 +477,16 @@ class BackgroundEmbedder:
             else:
                 _log.debug(f"SKIP (0 chunks after split): {self._current_file}")
                 self._skip_count += 1
+                self._set_last_failure("no_chunks", "Text splitter produced no chunks")
                 self._record_status(filepath, "no_chunks")
                 self._record_sidecar_status(filepath, "no_chunks", "Text splitter produced no chunks")
                 return False
             
         except Exception as e:
-            self._last_error = f"Error: {self._current_file} - {str(e)[:100]}"
+            category = _classify_error_text(str(e))
+            self._set_last_failure(category, f"Error: {self._current_file} - {str(e)[:100]}")
             _log.error(f"FAIL (exception): {self._current_file} | {str(e)[:150]}")
             self._error_count += 1
-            category = _classify_error_text(str(e))
             self._record_status(filepath, category)
             self._record_sidecar_status(filepath, category, str(e))
             return False
@@ -672,7 +694,7 @@ class BackgroundEmbedder:
                 "last_status_updated_at": self._last_status_updated_at,
             }
     
-    def process_single_file_synchronous(self, filepath: str) -> bool:
+    def process_single_file_synchronous(self, filepath: str) -> dict:
         """
         단일 파일 동기식 처리 (Active Learning / JIT Ingestion용)
         요청 받은 즉시 해당 파일을 임베딩하고 DB에 추가합니다.
@@ -680,21 +702,22 @@ class BackgroundEmbedder:
         with self._lock:
             print(f"[Embedder] JIT Processing Request: {filepath}")
             if self._embedding_disabled_for_session:
-                self._last_error = "Embedding disabled for this session after repeated VectorStore load failures"
+                self._set_last_failure("embedding_error", "Embedding disabled for this session after repeated VectorStore load failures")
                 print(f"[Embedder] {self._last_error}")
-                return False
+                return self._jit_result(filepath, False)
             if not self._is_processable_file(filepath):
-                self._last_error = f"JIT file is not processable: {filepath}"
+                self._set_last_failure("unsupported_extension", f"JIT file is not processable: {filepath}")
                 print(f"[Embedder] {self._last_error}")
-                return False
+                return self._jit_result(filepath, False)
             
             # 모델/DB 로드 확인
             if not self._lazy_load_vectorstore():
                 print("[Embedder] Failed to load vectorstore for JIT")
-                return False
+                self._last_error_category = self._last_error_category or "embedding_error"
+                return self._jit_result(filepath, False, self._last_error_category or "embedding_error", self._last_error)
             
             # 이미 처리된 파일인지 확인
-            if self._load_processed_files and filepath in self._processed_files:
+            if filepath in self._processed_files:
                 # 파일이 있지만 DB에 없을 수도 있으므로 재처리 강제? 
                 # 아니다, Active Learning은 'DB에 없는 것'을 대상으로 호출되므로 무조건 처리
                 pass
@@ -705,10 +728,10 @@ class BackgroundEmbedder:
             if success:
                 self._save_processed_file(filepath)
                 print(f"[Embedder] JIT Processing Success: {filepath}")
+                return self._jit_result(filepath, True, "ok", "")
             else:
                 print(f"[Embedder] JIT Processing Failed: {filepath}")
-                
-            return success
+                return self._jit_result(filepath, False)
 
     def get_processed_count(self) -> int:
         """총 처리된 파일 수"""

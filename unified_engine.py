@@ -18,7 +18,8 @@ from langchain_core.messages import SystemMessage, HumanMessage
 
 from rag_engine import LLM_MODEL, OLLAMA_BASE_URL, LLM_NUM_CTX, LLM_NUM_PREDICT, LLM_REQUEST_TIMEOUT
 from tools import search_files, search_content, search_hybrid
-from background_embedder import BackgroundEmbedder
+from background_embedder import BackgroundEmbedder, EMBEDDABLE_EXTENSIONS
+from direct_read import direct_read_candidates
 from conversation_logger import conversation_logger
 from ai_providers.provider_manager import get_provider
 from config_manager import load_config
@@ -31,6 +32,14 @@ CONTENT_SEARCH_TIMEOUT = 60  # content search 최대 대기 시간(초)
 
 def _search_config() -> Dict:
     return load_config().get("search", {})
+
+
+def _positive_int(value: Any, default: int) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return default
+    return parsed if parsed > 0 else default
 
 
 def _significant_tokens(text: str) -> List[str]:
@@ -440,10 +449,22 @@ def _execute_sub_query_streaming(sub_query: Dict, allow_jit: bool = True) -> Gen
             # --- Active Learning (JIT) ---
             if count > 0 and allow_jit:
                 jit_events = []
-                max_jit = int(_search_config().get("max_jit_files", 5))
+                max_jit = _positive_int(_search_config().get("max_jit_files"), 5)
                 _perform_jit_ingestion(result.get("results", [])[:max_jit], jit_events)
                 for ev in jit_events:
                     yield (ev, None)
+
+            if count > 0 and _search_config().get("enable_query_time_direct_read_fallback", True):
+                yield ({"type": "thinking", "content": "📖 후보 파일을 직접 열어 내용을 확인합니다..."}, None)
+                direct_results = direct_read_candidates(result.get("results", []), _search_config())
+                result["direct_read_results"] = direct_results
+                by_path = {r.get("path"): r for r in direct_results}
+                for file_result in result.get("results", []):
+                    path = file_result.get("path")
+                    if path in by_path:
+                        file_result["direct_read"] = by_path[path]
+                ok_count = sum(1 for r in direct_results if r.get("success"))
+                yield ({"type": "thinking", "content": f"✅ 직접 열람 완료: {ok_count}/{len(direct_results)}개 파일에서 텍스트 추출"}, None)
             
         elif q_type == 'content':
             # 내용 검색
@@ -496,7 +517,7 @@ def _perform_jit_ingestion(file_results: List[Dict], events: List[Dict]):
         for r in file_results:
             path = r.get("path")
             ext = os.path.splitext(path)[1].lower() if path else ""
-            if path and path not in processed_files and ext in ['.pdf', '.docx', '.pptx', '.xlsx', '.hwp', '.txt']:
+            if path and path not in processed_files and ext in EMBEDDABLE_EXTENSIONS:
                 missing.append(path)
         
         if missing:
@@ -506,10 +527,17 @@ def _perform_jit_ingestion(file_results: List[Dict], events: List[Dict]):
             for path in missing:
                 fname = os.path.basename(path)
                 events.append({"type": "thinking", "content": f"⚡ [JIT] '{fname}' 학습 중..."})
-                if embedder.process_single_file_synchronous(path):
+                result = embedder.process_single_file_synchronous(path)
+                success = result.get("success") if isinstance(result, dict) else bool(result)
+                if success:
                      events.append({"type": "thinking", "content": f"✅ [JIT] '{fname}' 완료"})
                 else:
-                     events.append({"type": "thinking", "content": f"⚠️ [JIT] '{fname}' 실패"})
+                     category = result.get("category", "unknown_error") if isinstance(result, dict) else "unknown_error"
+                     detail = result.get("detail", "") if isinstance(result, dict) else ""
+                     suffix = f" ({category})" if category else ""
+                     if detail:
+                         suffix += f": {str(detail)[:200]}"
+                     events.append({"type": "error", "content": f"[JIT] '{fname}' 실패{suffix}"})
                      
     except Exception as e:
         events.append({"type": "thinking", "content": f"⚠️ JIT Error: {e}"})
@@ -534,17 +562,35 @@ def _synthesize_answer(question: str, execution_results: List[Dict], chat_histor
             count = res.get("count", 0)
             file_hit_count += count
             if count > 0:
-                top_files = [f"📄 {r.get('name')} ({r.get('path')})" for r in res.get("results", [])[:5]]
-                context_parts.append(f"=== 파일 검색 결과 (Query: {sq['query']}) ===\n" + "\n".join(top_files))
+                top_files = []
+                direct_context_chars = _positive_int(_search_config().get("max_direct_read_context_chars"), 12000)
+                used_direct_chars = 0
+                per_file_context_chars = _positive_int(_search_config().get("max_direct_read_context_chars_per_file"), 3000)
+                for r in res.get("results", [])[:5]:
+                    line = f"📄 {r.get('name')} ({r.get('path')})"
+                    direct = r.get("direct_read") or {}
+                    if direct.get("success") and direct.get("content") and used_direct_chars < direct_context_chars:
+                        remaining = max(0, direct_context_chars - used_direct_chars)
+                        snippet = str(direct.get("content") or "")[: min(per_file_context_chars, remaining)]
+                        used_direct_chars += len(snippet)
+                        line += f"\n[직접 열람 내용]\n{snippet}"
+                    elif direct:
+                        category = direct.get("category") or "unknown_error"
+                        detail = direct.get("detail") or ""
+                        ocr_note = " OCR 필요." if direct.get("ocr_needed") else ""
+                        line += f"\n[직접 열람 실패] {category}: {detail}{ocr_note}"
+                    top_files.append(line)
+                context_parts.append(f"=== 파일 검색 결과 (Query: {sq['query']}) ===\n" + "\n\n".join(top_files))
                 
                 # 소스 메타데이터
                 for r in res.get("results", [])[:5]:
                     source_info.append({
                         "source": r.get("path"),
                         "type": "file",
-                        "source_engine": r.get("source_engine", "filename"),
+                        "source_engine": (r.get("direct_read") or {}).get("source_engine", r.get("source_engine", "filename")),
                         "score": r.get("score"),
                         "metadata": r.get("metadata", {}),
+                        "snippet": ((r.get("direct_read") or {}).get("content") or "")[:300],
                     })
 
         elif data.get("type") in ("content", "hybrid"):

@@ -51,8 +51,14 @@ class SQLiteIndexTests(unittest.TestCase):
 
     def test_tools_metadata_search_is_disabled_by_default(self):
         import tools
+        import config_manager
 
-        result = tools.search_metadata_content("alarm", k=3)
+        original_load_config = config_manager.load_config
+        config_manager.load_config = lambda: {}
+        try:
+            result = tools.search_metadata_content("alarm", k=3)
+        finally:
+            config_manager.load_config = original_load_config
 
         self.assertTrue(result["disabled"])
         self.assertEqual(result["count"], 0)

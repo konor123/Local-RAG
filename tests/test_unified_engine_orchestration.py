@@ -1,5 +1,7 @@
 import importlib
+import os
 import sys
+import tempfile
 import types
 import unittest
 
@@ -49,6 +51,7 @@ def import_unified_engine():
         pass
 
     background_embedder.BackgroundEmbedder = BackgroundEmbedder
+    background_embedder.EMBEDDABLE_EXTENSIONS = {".pdf", ".docx", ".xlsx", ".hwp", ".txt"}
     sys.modules["background_embedder"] = background_embedder
 
     if "unified_engine" in sys.modules:
@@ -65,6 +68,11 @@ class UnifiedOrchestrationTests(unittest.TestCase):
         self.original_review = self.engine._review_tool_results
         self.original_answer_direct = self.engine._answer_direct
         self.original_log = self.engine.conversation_logger.log_interaction
+        self.original_search_files = self.engine.search_files
+        self.original_direct_read_candidates = self.engine.direct_read_candidates
+        self.original_background_embedder = self.engine.BackgroundEmbedder
+        self.original_load_config = self.engine.load_config
+        self.original_get_provider = self.engine.get_provider
         self.logged = []
         self.engine.conversation_logger.log_interaction = lambda **kwargs: self.logged.append(kwargs)
 
@@ -75,6 +83,11 @@ class UnifiedOrchestrationTests(unittest.TestCase):
         self.engine._review_tool_results = self.original_review
         self.engine._answer_direct = self.original_answer_direct
         self.engine.conversation_logger.log_interaction = self.original_log
+        self.engine.search_files = self.original_search_files
+        self.engine.direct_read_candidates = self.original_direct_read_candidates
+        self.engine.BackgroundEmbedder = self.original_background_embedder
+        self.engine.load_config = self.original_load_config
+        self.engine.get_provider = self.original_get_provider
 
     def test_direct_mode_returns_answer_without_tools(self):
         called_tools = []
@@ -172,6 +185,88 @@ class UnifiedOrchestrationTests(unittest.TestCase):
 
         self.assertEqual(executed[0].startswith("*"), True)
         self.assertEqual(executed[1:], ["첫 검색", "수정 검색"])
+
+    def test_jit_failure_emits_error_with_category_and_detail(self):
+        with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp:
+            tmp_path = tmp.name
+        self.addCleanup(lambda: os.path.exists(tmp_path) and os.remove(tmp_path))
+        processed_fd, processed_path = tempfile.mkstemp()
+        os.close(processed_fd)
+        self.addCleanup(lambda: os.path.exists(processed_path) and os.remove(processed_path))
+        old_env = os.environ.get("PROCESSED_FILES_PATH")
+        os.environ["PROCESSED_FILES_PATH"] = processed_path
+        self.addCleanup(lambda: os.environ.pop("PROCESSED_FILES_PATH", None) if old_env is None else os.environ.__setitem__("PROCESSED_FILES_PATH", old_env))
+
+        class FailingEmbedder:
+            def process_single_file_synchronous(self, path):
+                return {"success": False, "category": "no_chunks", "detail": "Loader returned no chunks", "path": path}
+
+        self.engine.BackgroundEmbedder = FailingEmbedder
+        events = []
+
+        self.engine._perform_jit_ingestion([{"path": tmp_path, "name": os.path.basename(tmp_path)}], events)
+
+        error_events = [e for e in events if e.get("type") == "error"]
+        self.assertEqual(len(error_events), 1)
+        self.assertIn("no_chunks", error_events[0]["content"])
+        self.assertIn("Loader returned no chunks", error_events[0]["content"])
+
+    def test_file_query_attaches_direct_read_results(self):
+        self.engine.load_config = lambda: {"search": {"enable_query_time_direct_read_fallback": True, "max_jit_files": 0}}
+        self.engine.search_files = lambda query, sort_by="date_newest": {
+            "query": query,
+            "count": 1,
+            "results": [{"path": "C:/docs/cert.pdf", "name": "cert.pdf"}],
+        }
+        self.engine.direct_read_candidates = lambda results, config=None: [{
+            "success": True,
+            "path": "C:/docs/cert.pdf",
+            "name": "cert.pdf",
+            "content": "주민등록번호 900101-1234567 포함",
+            "source_engine": "direct_read",
+            "category": "ok",
+        }]
+
+        outputs = list(self.engine._execute_sub_query_streaming({"type": "file", "query": "*cert*"}, allow_jit=False))
+        data = outputs[-1][1]
+
+        self.assertEqual(data["result"]["results"][0]["direct_read"]["source_engine"], "direct_read")
+        self.assertIn("900101", data["result"]["results"][0]["direct_read"]["content"])
+
+    def test_synthesis_includes_direct_read_content_and_source_engine(self):
+        captured = {}
+
+        class Provider:
+            def synthesize(self, question, context, history):
+                captured["context"] = context
+                return "직접 열람 답변"
+
+        self.engine.get_provider = lambda: Provider()
+        execution_results = [{
+            "sub_query": {"type": "file", "query": "*cert*"},
+            "data": {
+                "type": "file",
+                "result": {
+                    "count": 1,
+                    "results": [{
+                        "path": "C:/docs/cert.pdf",
+                        "name": "cert.pdf",
+                        "direct_read": {
+                            "success": True,
+                            "content": "주민등록번호 900101-1234567 포함",
+                            "source_engine": "direct_read",
+                        },
+                    }],
+                },
+            },
+        }]
+
+        events = list(self.engine._synthesize_answer("주민등록번호 있나?", execution_results, []))
+        answer = [e for e in events if e.get("type") == "answer"][0]
+
+        self.assertIn("주민등록번호 900101-1234567 포함", captured["context"])
+        self.assertEqual(answer["sources"][0]["source_engine"], "direct_read")
+        self.assertIn("900101", answer["sources"][0]["snippet"])
 
 
 if __name__ == "__main__":
