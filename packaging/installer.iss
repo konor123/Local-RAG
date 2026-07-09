@@ -8,7 +8,7 @@
 #define MyAppName "OSL AI Assistant"
 #define MyAppNameShort "OSL AI Assistant"
 #define MyAppNameShortNoSpace "OSL_AI_Assistant"
-#define MyAppVersion "1.4.1"
+#define MyAppVersion "1.4.2"
 #define MyAppPublisher "OSL ENG"
 #define MyAppURL "https://example.com"
 #define MyAppExeName "OSL_AI_Assistant.exe"

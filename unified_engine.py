@@ -94,6 +94,35 @@ def _fallback_llm_plan(question: str) -> Dict:
     }
 
 
+def _ensure_file_search_safety_net(plan: Dict, question: str, max_patterns: int = 2) -> Dict:
+    """Add a generic filename-search safety net when the LLM omitted file search.
+
+    This keeps the LLM's plan/order intact as much as possible while restoring the
+    pre-v1.4.1 guarantee that document-like text can still be found by filename.
+    It uses the shared token extractor only; no document-type suffix list.
+    """
+    if not isinstance(plan, dict) or plan.get("mode") != "tools":
+        return plan
+    sub_queries = _coerce_sub_queries(plan.get("sub_queries", []))
+    if not sub_queries or any(sq.get("type") == "file" for sq in sub_queries):
+        plan["sub_queries"] = sub_queries
+        return plan
+
+    patterns = _fallback_file_patterns(question)[:max_patterns]
+    if not patterns:
+        plan["sub_queries"] = sub_queries
+        return plan
+
+    safety_queries = [
+        {"type": "file", "query": pattern, "reason": "Generic filename safety net"}
+        for pattern in patterns
+    ]
+    plan = dict(plan)
+    plan["sub_queries"] = safety_queries + sub_queries
+    plan["file_safety_net"] = True
+    return plan
+
+
 def _format_plan_desc(sub_queries: List[Dict]) -> str:
     return "\n".join(
         f"- [{sq.get('type', '').upper()}] {sq.get('query', '')} ({sq.get('reason', '')})"
@@ -202,6 +231,8 @@ def get_unified_response(
     if not plan:
         yield {"type": "thinking", "content": "⚠️ LLM 계획 수립 실패, 제한적 fallback 검색으로 전환합니다."}
         plan = _fallback_llm_plan(question)
+    else:
+        plan = _ensure_file_search_safety_net(plan, question)
 
     plan_trace = {"mode": plan.get("mode", "tools"), "rounds": [], "initial_plan": plan}
     execution_results: List[Dict] = []

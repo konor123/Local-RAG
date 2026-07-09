@@ -87,7 +87,7 @@ class UnifiedOrchestrationTests(unittest.TestCase):
         self.assertEqual([e for e in events if e.get("type") == "answer"][0]["content"], "direct")
         self.assertEqual(called_tools, [])
 
-    def test_hybrid_runs_only_when_llm_requests_hybrid(self):
+    def test_hybrid_runs_when_llm_requests_hybrid_with_file_safety_net(self):
         executed = []
         self.engine._plan_query = lambda question, history=None: {
             "mode": "tools",
@@ -104,7 +104,8 @@ class UnifiedOrchestrationTests(unittest.TestCase):
 
         list(self.engine.get_unified_response("카탈로그 내용 확인해줘"))
 
-        self.assertEqual(executed, [("hybrid", "유도등 카탈로그")])
+        self.assertEqual(executed[0][0], "file")
+        self.assertEqual(executed[1], ("hybrid", "유도등 카탈로그"))
 
     def test_llm_order_is_preserved_and_content_not_skipped_after_file_hit(self):
         executed = []
@@ -128,6 +129,26 @@ class UnifiedOrchestrationTests(unittest.TestCase):
 
         self.assertEqual(executed, ["content", "file"])
 
+    def test_tools_plan_without_file_gets_generic_file_safety_net(self):
+        executed = []
+        self.engine._plan_query = lambda question, history=None: {
+            "mode": "tools",
+            "sub_queries": [{"type": "content", "query": "중소기업확인서", "reason": "LLM chose content"}],
+        }
+        self.engine._review_tool_results = lambda *args, **kwargs: {"action": "answer", "reason": "enough"}
+        self.engine._synthesize_answer = lambda *args, **kwargs: iter([{"type": "answer", "content": "done", "sources": []}])
+
+        def execute(sq, allow_jit=True):
+            executed.append((sq["type"], sq["query"]))
+            yield (None, {"type": sq["type"], "result": {"count": 1, "results": []}})
+
+        self.engine._execute_sub_query_streaming = execute
+
+        list(self.engine.get_unified_response("중소기업확인서"))
+
+        self.assertEqual(executed[0], ("file", "*중소기업확인서*"))
+        self.assertEqual(executed[1], ("content", "중소기업확인서"))
+
     def test_review_can_request_revised_search(self):
         executed = []
         self.engine._plan_query = lambda question, history=None: {
@@ -149,7 +170,8 @@ class UnifiedOrchestrationTests(unittest.TestCase):
 
         list(self.engine.get_unified_response("다시 찾아줘"))
 
-        self.assertEqual(executed, ["첫 검색", "수정 검색"])
+        self.assertEqual(executed[0].startswith("*"), True)
+        self.assertEqual(executed[1:], ["첫 검색", "수정 검색"])
 
 
 if __name__ == "__main__":

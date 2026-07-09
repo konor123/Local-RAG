@@ -62,7 +62,8 @@ class EvidenceSourceTests(unittest.TestCase):
         self.assertIn("FTS5", html)
         self.assertIn("page: 3", html)
         self.assertIn("alarm snippet", html)
-        self.assertIn("background:#ffffff", html)
+        self.assertIn("background:transparent", html)
+        self.assertNotIn("background:#ffffff", html)
         self.assertNotIn("background:#0f172a", html)
 
     def test_source_card_html_hides_lone_filename_badge(self):

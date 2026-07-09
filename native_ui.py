@@ -212,7 +212,8 @@ def _markdown_to_html(text: str) -> str:
     for i, code in enumerate(code_blocks):
         merged = merged.replace(
             f"\x00CODE{i}\x00",
-            f'<pre style="background:#f1f5f9;color:#1e293b;padding:8px;border-radius:4px;'
+            f'<pre style="background:transparent;color:#cbd5e1;padding:8px;border-radius:4px;'
+            f'border:1px solid #64748b;'
             f'overflow:auto;font-size:12px"><code>{_escape(code)}</code></pre>',
         )
     # Headings
@@ -232,7 +233,7 @@ def _markdown_to_html(text: str) -> str:
     merged = _re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", merged)
     merged = _re.sub(r"(?<!\*)\*(?!\*)(.+?)\*(?!\*)", r"<i>\1</i>", merged)
     merged = _re.sub(r"`([^`]+)`",
-        '<code style="background:#f1f5f9;color:#1e293b;padding:1px 4px;border-radius:3px">\\1</code>',
+        '<code style="background:transparent;color:#cbd5e1;padding:1px 4px;border-radius:3px">\\1</code>',
         merged)
     # Links: [text](url) — but only for non-file anchors to avoid conflicting with file:// rendering
     def _link_replace(match: "re.Match[str]") -> str:
@@ -302,14 +303,14 @@ def _source_card_html(src: dict) -> str:
     if metadata_text:
         detail_bits.append(f"<span>{metadata_text}</span>")
     detail = " · ".join(detail_bits)
-    detail_html = f'<div style="color:#6b7280;font-size:11px;margin-top:2px">{detail}</div>' if len(detail_bits) > 1 else ""
-    snippet_html = f'<div style="color:#374151;margin-top:4px;font-size:12px">{_escape(snippet)}</div>' if snippet else ""
+    detail_html = f'<div style="color:#94a3b8;font-size:11px;margin-top:2px">{detail}</div>' if len(detail_bits) > 1 else ""
+    snippet_html = f'<div style="color:#cbd5e1;margin-top:4px;font-size:12px">{_escape(snippet)}</div>' if snippet else ""
     return (
-        '<div style="border:1px solid #d1d5db;background:#ffffff;'
+        '<div style="border:1px solid #64748b;background:transparent;'
         'border-radius:6px;padding:8px;margin:6px 0">'
-        f'<a href="{href}" style="color:#2563eb;text-decoration:underline;font-weight:bold">📂 {_escape(filename)}</a>'
+        f'<a href="{href}" style="color:#60a5fa;text-decoration:underline;font-weight:bold">📂 {_escape(filename)}</a>'
         f'{detail_html}'
-        f'<div style="color:#64748b;font-size:11px;margin-top:2px">{_escape(path)}</div>'
+        f'<div style="color:#94a3b8;font-size:11px;margin-top:2px">{_escape(path)}</div>'
         f'{snippet_html}'
         '</div>'
     )
