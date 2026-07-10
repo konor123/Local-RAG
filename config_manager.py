@@ -79,6 +79,18 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "retry_backoff_seconds": [60, 300, 900, 3600],
         "max_metadata_mb_for_eager_load": 512,
         "max_index_mb_for_eager_load": 2048,
+        "adaptive_eager_load": {
+            "enabled": True,
+            "available_ram_fraction": 0.50,
+            "minimum_system_reserve_mb": 4096,
+            "minimum_system_reserve_fraction": 0.15,
+            "metadata_ram_multiplier": 5.0,
+            "index_ram_multiplier": 1.15,
+            "embedding_model_reserve_mb": 768,
+            "external_model_reserve_mb": 0,
+            "transient_reserve_mb": 512,
+            "metadata_cap_ceiling_mb": 1024,
+        },
         "max_file_size_mb": 200,
     },
     "metadata_index": {

@@ -34,6 +34,19 @@ _backend_load_failed_until = 0.0
 _backend_last_error = ""
 
 
+class MemoryPressureError(RuntimeError):
+    """Retryable refusal to eagerly load a vector store under memory pressure."""
+
+    def __init__(self, diagnostics: Dict):
+        self.diagnostics = diagnostics
+        super().__init__(
+            "Insufficient available memory for eager vector-store load: "
+            f"store needs {_format_mb(diagnostics.get('estimated_store_bytes', 0))}, "
+            f"safe store budget {_format_mb(diagnostics.get('store_budget_bytes', 0))}, "
+            f"available {_format_mb(diagnostics.get('available_bytes', 0))}"
+        )
+
+
 def _embedding_config() -> dict:
     return load_config().get("embedding", {})
 
@@ -52,6 +65,98 @@ def _format_mb(size_bytes: int) -> str:
     return f"{size_bytes / (1024 * 1024):.1f}MB"
 
 
+def _available_memory_bytes() -> int:
+    """Return available physical memory without requiring a platform-specific UI."""
+    try:
+        import psutil
+
+        return int(psutil.virtual_memory().available)
+    except Exception:
+        pass
+    if os.name != "nt":
+        return 0
+    try:
+        import ctypes
+        import ctypes.wintypes
+
+        class MEMORYSTATUSEX(ctypes.Structure):
+            _fields_ = [
+                ("dwLength", ctypes.wintypes.DWORD),
+                ("dwMemoryLoad", ctypes.wintypes.DWORD),
+                ("ullTotalPhys", ctypes.c_ulonglong),
+                ("ullAvailPhys", ctypes.c_ulonglong),
+                ("ullTotalPageFile", ctypes.c_ulonglong),
+                ("ullAvailPageFile", ctypes.c_ulonglong),
+                ("ullTotalVirtual", ctypes.c_ulonglong),
+                ("ullAvailVirtual", ctypes.c_ulonglong),
+                ("ullAvailExtendedVirtual", ctypes.c_ulonglong),
+            ]
+
+        status = MEMORYSTATUSEX()
+        status.dwLength = ctypes.sizeof(status)
+        if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status)):
+            return int(status.ullAvailPhys)
+    except Exception:
+        pass
+    return 0
+
+
+def _file_size(path: str) -> int:
+    try:
+        return os.path.getsize(path) if os.path.exists(path) else 0
+    except OSError:
+        return 0
+
+
+def get_memory_load_diagnostics(index_file: str = "", meta_file: str = "") -> Dict:
+    """Estimate whether eager vector-store loading is safe at this moment."""
+    cfg = _embedding_config()
+    adaptive = bool(cfg.get("adaptive_eager_load", {}).get("enabled", True))
+    policy = cfg.get("adaptive_eager_load", {})
+    available = _available_memory_bytes()
+    index_size = _file_size(index_file)
+    meta_size = _file_size(meta_file)
+    fraction = float(policy.get("available_ram_fraction", 0.50) or 0.50)
+    reserve_mb = int(policy.get("minimum_system_reserve_mb", 4096) or 4096)
+    reserve_fraction = float(policy.get("minimum_system_reserve_fraction", 0.15) or 0.15)
+    metadata_multiplier = float(policy.get("metadata_ram_multiplier", 5.0) or 5.0)
+    index_multiplier = float(policy.get("index_ram_multiplier", 1.15) or 1.15)
+    embedding_reserve = _mb_to_bytes(policy.get("embedding_model_reserve_mb"), 768)
+    external_reserve = _mb_to_bytes(policy.get("external_model_reserve_mb"), 0)
+    transient_reserve = _mb_to_bytes(policy.get("transient_reserve_mb"), 512)
+    system_reserve = max(_mb_to_bytes(reserve_mb, 4096), int(available * reserve_fraction))
+    future_workload_reserve = embedding_reserve + external_reserve + transient_reserve
+    fraction_cap = int(available * fraction)
+    store_budget = max(0, min(fraction_cap, available - system_reserve - future_workload_reserve))
+    estimated_store = int(meta_size * metadata_multiplier + index_size * index_multiplier)
+    return {
+        "adaptive_enabled": adaptive,
+        "available_bytes": available,
+        "index_size_bytes": index_size,
+        "metadata_size_bytes": meta_size,
+        "system_reserve_bytes": system_reserve,
+        "fraction_cap_bytes": fraction_cap,
+        "future_workload_reserve_bytes": future_workload_reserve,
+        "store_budget_bytes": store_budget,
+        "load_budget_bytes": store_budget,
+        "estimated_store_bytes": estimated_store,
+        "estimated_peak_bytes": estimated_store + future_workload_reserve,
+        "metadata_multiplier": metadata_multiplier,
+        "allowed": bool(available and estimated_store <= store_budget),
+    }
+
+
+def get_active_memory_load_diagnostics() -> Dict:
+    """Return a non-loading memory estimate for the currently selected backend."""
+    if VECTOR_BACKEND == "turbovec":
+        index_file = os.path.join(TURBOVEC_INDEX_DIR, "index.tvim")
+        meta_file = os.path.join(TURBOVEC_INDEX_DIR, "metadata.jsonl")
+    else:
+        index_file = os.path.join(FAISS_INDEX_DIR, "index.faiss")
+        meta_file = os.path.join(FAISS_INDEX_DIR, "metadata.jsonl")
+    return get_memory_load_diagnostics(index_file, meta_file)
+
+
 def _guard_existing_store_size(index_file: str, meta_file: str, backend_name: str) -> None:
     """Refuse eager loading of known-oversized persisted vector stores.
 
@@ -60,8 +165,13 @@ def _guard_existing_store_size(index_file: str, meta_file: str, backend_name: st
     repeated memory spike.
     """
     cfg = _embedding_config()
+    policy = cfg.get("adaptive_eager_load", {})
+    adaptive = bool(policy.get("enabled", True))
     max_index = _mb_to_bytes(cfg.get("max_index_mb_for_eager_load"), 2048)
-    max_meta = _mb_to_bytes(cfg.get("max_metadata_mb_for_eager_load"), 512)
+    max_meta = _mb_to_bytes(
+        policy.get("metadata_cap_ceiling_mb", 1024) if adaptive else cfg.get("max_metadata_mb_for_eager_load"),
+        1024,
+    )
 
     if max_index and os.path.exists(index_file):
         index_size = os.path.getsize(index_file)
@@ -78,6 +188,10 @@ def _guard_existing_store_size(index_file: str, meta_file: str, backend_name: st
                 f"{backend_name} metadata file is too large for eager load: "
                 f"{_format_mb(meta_size)} > {_format_mb(max_meta)} ({meta_file})"
             )
+
+    diagnostics = get_memory_load_diagnostics(index_file, meta_file)
+    if diagnostics["adaptive_enabled"] and not diagnostics["allowed"]:
+        raise MemoryPressureError(diagnostics)
 
 
 def _backend_failure_cooldown_seconds() -> int:
@@ -178,6 +292,10 @@ class FaissBackend(VectorBackend):
                                 self._metadata.append(json.loads(line))
                     print(f"[VectorStore:faiss] Loaded index: {self._index.ntotal:,} vectors, {len(self._metadata):,} metadata entries")
                     return True
+                except MemoryPressureError:
+                    self._index = None
+                    self._metadata = []
+                    raise
                 except Exception as e:
                     self._index = None
                     self._metadata = []
@@ -312,6 +430,10 @@ class TurboVecBackend(VectorBackend):
                     self._next_id = max_id + 1
                     print(f"[VectorStore:turbovec] Loaded index: {len(self._index):,} vectors, {len(self._metadata_by_id):,} metadata entries")
                     return True
+                except MemoryPressureError:
+                    self._index = None
+                    self._metadata_by_id = {}
+                    raise
                 except Exception as e:
                     self._index = None
                     self._metadata_by_id = {}
@@ -425,6 +547,13 @@ def _get_backend() -> VectorBackend:
             _fallback_active = False
             _backend_load_failed_until = 0.0
             _backend_last_error = ""
+        except MemoryPressureError as e:
+            _backend = None
+            _fallback_active = False
+            _backend_last_error = str(e)
+            _backend_load_failed_until = 0.0
+            print(f"[VectorStore:{VECTOR_BACKEND}] Waiting for memory: {e}")
+            raise
         except Exception as e:
             _backend = None
             _fallback_active = False

@@ -665,6 +665,9 @@ class BackgroundTaskManager(QObject):
                 return "⚙️ 임베딩: 인덱스 준비 중..."
             if state == "backoff":
                 return f"⚙️ 임베딩: 재시도 대기 중 · 오류 {error:,}"
+            if state == "waiting_for_memory":
+                wait = max(0, int(float(st.get("memory_wait_until", 0) or 0) - time.time()))
+                return f"⚙️ 임베딩: 메모리 여유 대기 중 · {wait}초 후 재시도"
             if state == "disabled":
                 return "⚙️ 임베딩: 비활성화됨"
             if state in ("idle", "scanning") and processable_total == 0:
@@ -714,6 +717,16 @@ class IndexingStatusDialog(QDialog):
         ocr_cfg = cfg.get("search", {}).get("ocr", {})
         backoff_until = float(st.get("backoff_until", 0) or 0)
         backoff_remaining = max(0, int(backoff_until - time.time())) if backoff_until else 0
+        memory_wait_until = float(st.get("memory_wait_until", 0) or 0)
+        memory_wait_remaining = max(0, int(memory_wait_until - time.time())) if memory_wait_until else 0
+        memory = st.get("memory_wait_details", {}) or {}
+        if not memory:
+            try:
+                from faiss_store import get_active_memory_load_diagnostics
+
+                memory = get_active_memory_load_diagnostics()
+            except Exception:
+                memory = {}
         extension_stats = st.get("extension_stats", {}) or {}
         ext_lines = []
         for ext, stats in sorted(extension_stats.items()):
@@ -741,7 +754,17 @@ class IndexingStatusDialog(QDialog):
             f"  누적 처리 파일: {int(st.get('total_processed', 0) or 0):,}",
             f"  비활성화: {'예' if st.get('embedding_disabled_for_session') else '아니오'}",
             f"  재시도 대기: {backoff_remaining}초" if backoff_remaining else "  재시도 대기: 없음",
+            f"  메모리 대기: {memory_wait_remaining}초" if memory_wait_remaining else "  메모리 대기: 없음",
             f"  마지막 오류: {st.get('last_error') or '-'}",
+            "",
+            "[시스템 메모리/로드 판단]",
+            f"  사용 가능 RAM: {memory.get('available_bytes', 0) / (1024 ** 3):.1f}GB" if memory else "  사용 가능 RAM: 확인 불가",
+            f"  시스템 여유분: {memory.get('system_reserve_bytes', 0) / (1024 ** 3):.1f}GB" if memory else "  시스템 여유분: 확인 불가",
+            f"  향후 작업 reserve: {memory.get('future_workload_reserve_bytes', 0) / (1024 ** 3):.1f}GB" if memory else "  향후 작업 reserve: 확인 불가",
+            f"  안전 store 예산: {memory.get('store_budget_bytes', 0) / (1024 ** 3):.1f}GB" if memory else "  안전 store 예산: 확인 불가",
+            f"  예상 store 필요량: {memory.get('estimated_store_bytes', 0) / (1024 ** 3):.1f}GB" if memory else "  예상 store 필요량: 확인 불가",
+            f"  인덱스/메타데이터 크기: {memory.get('index_size_bytes', 0) / (1024 ** 2):.1f}MB / {memory.get('metadata_size_bytes', 0) / (1024 ** 2):.1f}MB" if memory else "  인덱스/메타데이터 크기: 확인 불가",
+            f"  로드 판단: {'가능' if memory.get('allowed') else '메모리 확보 대기'}" if memory else "  로드 판단: 확인 불가",
             "",
             "[SQLite/FTS 인덱스]",
             f"  SQLite sidecar: {'사용' if metadata.get('enabled', True) else '미사용'}",

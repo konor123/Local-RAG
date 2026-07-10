@@ -157,6 +157,9 @@ class BackgroundEmbedder:
         self._backoff_until = 0.0
         self._embedding_disabled_for_session = not self._embedding_enabled
         self._last_vectorstore_error = ""
+        self._memory_wait_until = 0.0
+        self._memory_wait_attempts = 0
+        self._memory_wait_details = {}
         
         # 처리된 파일 목록 로드
         self._processed_files: Set[str] = self._load_processed_files()
@@ -273,6 +276,7 @@ class BackgroundEmbedder:
             self._consecutive_load_failures = 0
             self._backoff_until = 0.0
             self._last_vectorstore_error = ""
+        self._clear_memory_wait()
 
     def _register_vectorstore_load_failure(self, error: str) -> int:
         with self._lock:
@@ -291,6 +295,25 @@ class BackgroundEmbedder:
             return 0
         remaining = int(max(0, self._backoff_until - time.time()))
         return remaining
+
+    def _memory_wait_retry_delay(self) -> int:
+        return int(max(0, self._memory_wait_until - time.time()))
+
+    def _register_memory_wait(self, diagnostics: dict) -> int:
+        """Schedule a retryable memory wait without consuming failure budget."""
+        with self._lock:
+            self._memory_wait_attempts += 1
+            delays = [60, 300, 900]
+            delay = delays[min(self._memory_wait_attempts - 1, len(delays) - 1)]
+            self._memory_wait_until = time.time() + delay
+            self._memory_wait_details = dict(diagnostics or {})
+            return delay
+
+    def _clear_memory_wait(self) -> None:
+        with self._lock:
+            self._memory_wait_until = 0.0
+            self._memory_wait_attempts = 0
+            self._memory_wait_details = {}
     
     def _lazy_load_model(self) -> bool:
         """모델 지연 로딩"""
@@ -320,6 +343,10 @@ class BackgroundEmbedder:
         if self._embedding_disabled_for_session:
             self._last_error = "Embedding disabled for this session after repeated VectorStore load failures"
             return False
+        memory_wait_delay = self._memory_wait_retry_delay()
+        if memory_wait_delay > 0:
+            self._last_error = f"Waiting for memory for {memory_wait_delay}s"
+            return False
         retry_delay = self._vectorstore_retry_delay()
         if retry_delay > 0:
             self._last_error = f"VectorStore load is in backoff for {retry_delay}s: {self._last_vectorstore_error}"
@@ -334,6 +361,17 @@ class BackgroundEmbedder:
             print(f"[Embedder] VectorStore index loaded successfully ({get_backend_name()})")
             return True
         except Exception as e:
+            try:
+                from faiss_store import MemoryPressureError
+            except Exception:
+                MemoryPressureError = ()
+            if isinstance(e, MemoryPressureError):
+                diagnostics = getattr(e, "diagnostics", {})
+                delay = self._register_memory_wait(diagnostics)
+                self._last_error = str(e)
+                self._last_vectorstore_error = self._last_error
+                print(f"[Embedder] Memory pressure; retrying after {delay}s: {self._last_error}")
+                return False
             error = str(e)
             self._last_error = f"VectorStore load failed: {error}"
             self._register_vectorstore_load_failure(error)
@@ -560,9 +598,15 @@ class BackgroundEmbedder:
                         self._update_state(state="disabled", current_file="임베딩 비활성화", last_error=self._last_error)
                         _log.error(f"VectorStore load FAILED: {self._last_error} — embedding disabled for this session")
                         break
-                    retry_delay = self._vectorstore_retry_delay() or self.idle_sleep
-                    self._update_state(state="backoff", current_file=f"재시도 대기 {retry_delay}s", last_error=self._last_error)
-                    _log.error(f"VectorStore load FAILED: {self._last_error} — retrying after {retry_delay}s")
+                    memory_wait = self._memory_wait_retry_delay()
+                    retry_delay = memory_wait or self._vectorstore_retry_delay() or self.idle_sleep
+                    state = "waiting_for_memory" if memory_wait else "backoff"
+                    current_file = "메모리 여유 대기 중" if memory_wait else f"재시도 대기 {retry_delay}s"
+                    self._update_state(state=state, current_file=current_file, last_error=self._last_error)
+                    if memory_wait:
+                        _log.warning(f"VectorStore waiting for memory: {self._last_error} — retrying after {retry_delay}s")
+                    else:
+                        _log.error(f"VectorStore load FAILED: {self._last_error} — retrying after {retry_delay}s")
                     time.sleep(retry_delay)
                     continue
                 _log.info("VectorStore loaded OK")
@@ -682,6 +726,9 @@ class BackgroundEmbedder:
                 "last_error": self._last_error,
                 "consecutive_load_failures": self._consecutive_load_failures,
                 "backoff_until": self._backoff_until,
+                "memory_wait_until": self._memory_wait_until,
+                "memory_wait_attempts": self._memory_wait_attempts,
+                "memory_wait_details": dict(self._memory_wait_details),
                 "embedding_disabled_for_session": self._embedding_disabled_for_session,
                 "last_vectorstore_error": self._last_vectorstore_error,
                 "total_processed": len(self._processed_files),
