@@ -138,6 +138,48 @@ class SQLiteIndexTests(unittest.TestCase):
         self.assertEqual(stats["fts_chunks"], 2)
         self.assertIn("busy", checkpoint)
 
+    def test_vector_id_allocation_and_metadata_lookup(self):
+        import sqlite_index
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "metadata.sqlite3")
+            source = os.path.join(tmpdir, "manual.txt")
+            with open(source, "w", encoding="utf-8") as f:
+                f.write("fixture")
+
+            ids = sqlite_index.allocate_vector_ids(2, db_path=db_path)
+            sqlite_index.upsert_chunks(
+                source,
+                [
+                    {"content": "alpha", "metadata": {"page": 1}, "vector_id": ids[0]},
+                    {"content": "bravo", "metadata": {"page": 2}, "vector_id": ids[1]},
+                ],
+                db_path=db_path,
+            )
+            rows = sqlite_index.get_vector_metadata_by_ids([ids[1], ids[0]], db_path=db_path)
+
+        self.assertEqual(ids, [1, 2])
+        self.assertEqual(rows[ids[0]]["content"], "alpha")
+        self.assertEqual(rows[ids[1]]["metadata"]["page"], 2)
+
+    def test_allocator_advances_past_existing_vector_ids(self):
+        import sqlite_index
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "metadata.sqlite3")
+            source = os.path.join(tmpdir, "manual.txt")
+            with open(source, "w", encoding="utf-8") as f:
+                f.write("fixture")
+
+            sqlite_index.upsert_chunks(
+                source,
+                [{"content": "legacy", "metadata": {}, "vector_id": 41}],
+                db_path=db_path,
+            )
+            ids = sqlite_index.allocate_vector_ids(2, db_path=db_path)
+
+        self.assertEqual(ids, [42, 43])
+
 
 if __name__ == "__main__":
     unittest.main()

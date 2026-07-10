@@ -1222,9 +1222,10 @@ def ingest_data():
     def writer_worker():
         print("   [Writer] Started. VectorStore Mode.")
         if INDEX_SAMPLE_WRITE:
-            from faiss_store import add_documents, save_index
+            from faiss_store import add_documents, get_backend_name, save_index
         else:
             add_documents = None
+            get_backend_name = None
             save_index = None
         
         while True:
@@ -1256,7 +1257,8 @@ def ingest_data():
                     if vector_docs and INDEX_SAMPLE_WRITE:
                         add_documents(vector_docs)
                         save_index()
-                        record_sidecar_chunks_by_source(vector_docs)
+                        if get_backend_name() != "turbovec":
+                            record_sidecar_chunks_by_source(vector_docs)
                         vector_write_success = True
                     elif vector_docs:
                         print(f"   [Writer] Sample report-only: skipped vector write for {len(vector_docs)} chunks")

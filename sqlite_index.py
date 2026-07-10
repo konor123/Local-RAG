@@ -1,9 +1,9 @@
 # -*- coding: utf-8 -*-
-"""SQLite metadata and FTS5 sidecar for search/index validation.
+"""SQLite metadata and FTS5 storage for search/index validation.
 
-This module is intentionally side-by-side with the existing JSONL/vector store.
-All application integrations should treat writes as best-effort so SQLite cannot
-break embedding or vector search while Phase 4 is being validated.
+The FTS/status integrations remain best-effort via the ``safe_*`` helpers. The
+vector metadata helpers are required for TurboVec search: vector rows are looked
+up by stable vector_id instead of eagerly loading metadata.jsonl into memory.
 """
 from __future__ import annotations
 
@@ -53,6 +53,7 @@ def _connect(db_path: Optional[str] = None) -> sqlite3.Connection:
     Path(path).parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(path)
     conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA busy_timeout=5000")
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=ON")
     return conn
@@ -80,9 +81,15 @@ def init_db(db_path: Optional[str] = None) -> str:
                 chunk_id TEXT PRIMARY KEY,
                 doc_id TEXT NOT NULL REFERENCES documents(doc_id) ON DELETE CASCADE,
                 chunk_index INTEGER NOT NULL,
+                vector_id INTEGER UNIQUE,
                 content TEXT NOT NULL,
                 metadata_json TEXT,
                 UNIQUE(doc_id, chunk_index)
+            );
+
+            CREATE TABLE IF NOT EXISTS vector_allocators (
+                name TEXT PRIMARY KEY,
+                next_id INTEGER NOT NULL
             );
 
             CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(
@@ -101,7 +108,88 @@ def init_db(db_path: Optional[str] = None) -> str:
             );
             """
             )
+            columns = {row[1] for row in conn.execute("PRAGMA table_info(chunks)").fetchall()}
+            if "vector_id" not in columns:
+                conn.execute("ALTER TABLE chunks ADD COLUMN vector_id INTEGER")
+            conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_chunks_vector_id ON chunks(vector_id)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_chunks_doc_id ON chunks(doc_id)")
+            conn.execute(
+                "INSERT OR IGNORE INTO vector_allocators(name, next_id) VALUES ('default', 1)"
+            )
+            max_row = conn.execute("SELECT COALESCE(MAX(vector_id), 0) AS max_id FROM chunks").fetchone()
+            max_id = int(max_row["max_id"] or 0)
+            conn.execute(
+                "UPDATE vector_allocators SET next_id = ? WHERE name = 'default' AND next_id <= ?",
+                (max_id + 1, max_id),
+            )
     return path
+
+
+def allocate_vector_ids(count: int, db_path: Optional[str] = None) -> List[int]:
+    """Atomically allocate a contiguous block of positive vector IDs."""
+    count = int(count or 0)
+    if count <= 0:
+        return []
+    init_db(db_path)
+    with closing(_connect(db_path)) as conn:
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT next_id FROM vector_allocators WHERE name = 'default'"
+            ).fetchone()
+            start_id = int(row["next_id"] if row else 1)
+            end_id = start_id + count
+            conn.execute(
+                "INSERT INTO vector_allocators(name, next_id) VALUES ('default', ?) "
+                "ON CONFLICT(name) DO UPDATE SET next_id=excluded.next_id",
+                (end_id,),
+            )
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+    return list(range(start_id, end_id))
+
+
+def get_vector_metadata_count(db_path: Optional[str] = None) -> int:
+    """Return the number of chunks that have vector metadata IDs."""
+    init_db(db_path)
+    with closing(_connect(db_path)) as conn:
+        row = conn.execute("SELECT COUNT(*) AS count FROM chunks WHERE vector_id IS NOT NULL").fetchone()
+    return int(row["count"] or 0)
+
+
+def get_vector_metadata_by_ids(vector_ids: Iterable[int], db_path: Optional[str] = None) -> Dict[int, Dict]:
+    """Return chunk metadata keyed by vector_id for the requested IDs."""
+    ids = [int(value) for value in vector_ids or [] if int(value) > 0]
+    if not ids:
+        return {}
+    init_db(db_path)
+    results: Dict[int, Dict] = {}
+    with closing(_connect(db_path)) as conn:
+        for offset in range(0, len(ids), 900):
+            batch = ids[offset:offset + 900]
+            placeholders = ",".join("?" for _ in batch)
+            rows = conn.execute(
+                f"""
+                SELECT c.vector_id, c.content, c.metadata_json, d.source_path
+                FROM chunks c
+                JOIN documents d ON d.doc_id = c.doc_id
+                WHERE c.vector_id IN ({placeholders})
+                """,
+                batch,
+            ).fetchall()
+            for row in rows:
+                try:
+                    metadata = json.loads(row["metadata_json"] or "{}")
+                except json.JSONDecodeError:
+                    metadata = {}
+                results[int(row["vector_id"])] = {
+                    "content": row["content"],
+                    "source": row["source_path"],
+                    "metadata": metadata,
+                }
+    return results
 
 
 def _file_info(source_path: str) -> Dict[str, object]:
@@ -188,9 +276,11 @@ def upsert_chunks(source_path: str, chunks: Iterable[Dict], status: str = "ok", 
                 content = str(chunk.get("content") or "")
                 chunk_id = f"{doc_id}:{index}"
                 metadata_json = json.dumps(chunk.get("metadata", {}), ensure_ascii=False)
+                vector_id = chunk.get("vector_id")
+                vector_id = int(vector_id) if vector_id else None
                 conn.execute(
-                    "INSERT INTO chunks(chunk_id, doc_id, chunk_index, content, metadata_json) VALUES (?, ?, ?, ?, ?)",
-                    (chunk_id, doc_id, index, content, metadata_json),
+                    "INSERT INTO chunks(chunk_id, doc_id, chunk_index, vector_id, content, metadata_json) VALUES (?, ?, ?, ?, ?, ?)",
+                    (chunk_id, doc_id, index, vector_id, content, metadata_json),
                 )
                 conn.execute(
                     "INSERT INTO chunks_fts(content, chunk_id, doc_id, source_path) VALUES (?, ?, ?, ?)",

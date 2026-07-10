@@ -457,7 +457,7 @@ class BackgroundEmbedder:
                 return False
             
             # VectorStore index 추가
-            from faiss_store import add_documents, save_index
+            from faiss_store import add_documents, get_backend_name, save_index
             
             vector_docs = []
             for item in data:
@@ -507,7 +507,8 @@ class BackgroundEmbedder:
             if final_docs:
                 add_documents(final_docs)
                 save_index()  # 매 파일마다 저장 (크래시 방지)
-                self._record_sidecar_chunks(filepath, final_docs)
+                if get_backend_name() != "turbovec":
+                    self._record_sidecar_chunks(filepath, final_docs)
                 self._processed_count += 1
                 self._record_status(filepath, "ok")
                 _log.info(f"OK ({len(final_docs)} chunks): {self._current_file}")

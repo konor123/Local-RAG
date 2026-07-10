@@ -8,7 +8,7 @@
 #define MyAppName "OSL AI Assistant"
 #define MyAppNameShort "OSL AI Assistant"
 #define MyAppNameShortNoSpace "OSL_AI_Assistant"
-#define MyAppVersion "1.4.5"
+#define MyAppVersion "1.5.0"
 #define MyAppPublisher "OSL ENG"
 #define MyAppURL "https://example.com"
 #define MyAppExeName "OSL_AI_Assistant.exe"
@@ -48,7 +48,7 @@ Name: "korean"; MessagesFile: "compiler:Languages\Korean.isl"
 
 [Tasks]
 Name: "desktopicon"; Description: "데스크톱에 바로가기 만들기"; GroupDescription: "추가 작업:"
-Name: "startup";     Description: "Windows 시작 시 자동 실행";      GroupDescription: "추가 작업:"; Flags: checkedonce
+Name: "startup";     Description: "Windows 시작 시 자동 실행";      GroupDescription: "추가 작업:"
 
 [Files]
 ; PyInstaller single-folder distribution

@@ -150,7 +150,7 @@ def get_active_memory_load_diagnostics() -> Dict:
     """Return a non-loading memory estimate for the currently selected backend."""
     if VECTOR_BACKEND == "turbovec":
         index_file = os.path.join(TURBOVEC_INDEX_DIR, "index.tvim")
-        meta_file = os.path.join(TURBOVEC_INDEX_DIR, "metadata.jsonl")
+        meta_file = ""
     else:
         index_file = os.path.join(FAISS_INDEX_DIR, "index.faiss")
         meta_file = os.path.join(FAISS_INDEX_DIR, "metadata.jsonl")
@@ -383,8 +383,6 @@ class TurboVecBackend(VectorBackend):
         self.meta_file = os.path.join(self.index_dir, "metadata.jsonl")
         self._lock = threading.RLock()
         self._index = None
-        self._metadata_by_id: Dict[int, dict] = {}
-        self._next_id = 1
         self._dirty = False
 
     def _ensure_dir(self):
@@ -402,49 +400,40 @@ class TurboVecBackend(VectorBackend):
             from turbovec import IdMapIndex
             index_exists = os.path.exists(self.index_file)
             meta_exists = os.path.exists(self.meta_file)
-            if index_exists and meta_exists:
+            if index_exists:
                 try:
-                    _guard_existing_store_size(self.index_file, self.meta_file, self.name)
+                    _guard_existing_store_size(self.index_file, "", self.name)
+                    vector_metadata_count = None
+                    if meta_exists:
+                        from sqlite_index import get_vector_metadata_count
+
+                        vector_metadata_count = get_vector_metadata_count()
+                        if vector_metadata_count == 0:
+                            raise RuntimeError(
+                                "Legacy TurboVec metadata.jsonl detected without SQLite vector metadata. "
+                                "Delete index.tvim, metadata.jsonl, processed_files_turbovec.txt, and metadata_index.sqlite3, "
+                                "then run a full reindex."
+                            )
                     self._index = IdMapIndex.load(self.index_file)
-                    self._metadata_by_id = {}
-                    max_id = 0
-                    with open(self.meta_file, "r", encoding="utf-8") as f:
-                        for line in f:
-                            line = line.strip()
-                            if not line:
-                                continue
-                            row = json.loads(line)
-                            row_id = int(row.get("id", 0))
-                            if row_id <= 0:
-                                continue
-                            self._metadata_by_id[row_id] = {
-                                "content": row.get("content", ""),
-                                "source": row.get("source", "Unknown"),
-                                "metadata": row.get("metadata", {}),
-                            }
-                            max_id = max(max_id, row_id)
-                    if len(self._index) != len(self._metadata_by_id):
+                    if len(self._index) and vector_metadata_count is None:
+                        from sqlite_index import get_vector_metadata_count
+
+                        vector_metadata_count = get_vector_metadata_count()
+                    if len(self._index) and not vector_metadata_count:
                         raise RuntimeError(
-                            f"TurboVec index/metadata count mismatch: index={len(self._index)}, metadata={len(self._metadata_by_id)}"
+                            "TurboVec index has vectors but no SQLite vector metadata. "
+                            "Delete index.tvim, metadata.jsonl, processed_files_turbovec.txt, and metadata_index.sqlite3, "
+                            "then run a full reindex."
                         )
-                    self._next_id = max_id + 1
-                    print(f"[VectorStore:turbovec] Loaded index: {len(self._index):,} vectors, {len(self._metadata_by_id):,} metadata entries")
+                    print(f"[VectorStore:turbovec] Loaded index: {len(self._index):,} vectors (SQLite metadata)")
                     return True
                 except MemoryPressureError:
                     self._index = None
-                    self._metadata_by_id = {}
                     raise
                 except Exception as e:
                     self._index = None
-                    self._metadata_by_id = {}
                     raise RuntimeError(f"TurboVec index exists but failed to load; refusing to create an empty replacement: {e}") from e
-            if index_exists != meta_exists:
-                raise RuntimeError(
-                    f"TurboVec index is incomplete: index_file_exists={index_exists}, metadata_file_exists={meta_exists}"
-                )
             self._index = self._new_index()
-            self._metadata_by_id = {}
-            self._next_id = 1
             print(f"[VectorStore:turbovec] Created new index (dim={VECTOR_DIM}, bit_width={TURBOVEC_BIT_WIDTH})")
             return True
 
@@ -456,17 +445,12 @@ class TurboVecBackend(VectorBackend):
             tmp_index_file = f"{self.index_file}.tmp"
             self._index.write(tmp_index_file)
             os.replace(tmp_index_file, self.index_file)
-            rows = [
-                {"id": row_id, **meta}
-                for row_id, meta in sorted(self._metadata_by_id.items())
-            ]
-            _atomic_write_jsonl(self.meta_file, rows)
             self._dirty = False
             print(f"[VectorStore:turbovec] Saved index: {len(self._index):,} vectors")
 
     def add_documents(self, documents: list) -> None:
         self.load_index()
-        vectors, ids, metas = [], [], []
+        vectors, metas = [], []
         for doc in documents or []:
             vec = doc.get("vector")
             if vec is None or len(vec) != VECTOR_DIM:
@@ -480,15 +464,24 @@ class TurboVecBackend(VectorBackend):
         if not vectors:
             return
         vec_array = _normalize_vectors(vectors)
+        from sqlite_index import allocate_vector_ids, upsert_chunks
+
+        vector_ids = allocate_vector_ids(len(vectors))
+        source_groups: Dict[str, list] = {}
+        for vector_id, meta in zip(vector_ids, metas):
+            source = meta.get("source") or "Unknown"
+            source_groups.setdefault(source, []).append({
+                "content": meta.get("content", ""),
+                "metadata": meta.get("metadata", {}),
+                "vector_id": int(vector_id),
+            })
+        for source, chunks in source_groups.items():
+            upsert_chunks(source, chunks, status="ok")
         with self._lock:
-            start_id = self._next_id
             import numpy as np
 
-            ids = np.arange(start_id, start_id + len(vectors), dtype=np.uint64)
+            ids = np.array(vector_ids, dtype=np.uint64)
             self._index.add_with_ids(vec_array, ids)
-            for row_id, meta in zip(ids.tolist(), metas):
-                self._metadata_by_id[int(row_id)] = meta
-            self._next_id += len(vectors)
             self._dirty = True
             total = len(self._index)
         if total % 100 < len(vectors):
@@ -502,18 +495,21 @@ class TurboVecBackend(VectorBackend):
             q_vec = _normalize_vectors([query_vector])
             search_k = min(k * 3, len(self._index))
             scores, ids = self._index.search(q_vec, k=search_k)
-            results = []
-            for score, row_id in zip(scores[0], ids[0]):
-                row_id = int(row_id)
-                meta = self._metadata_by_id.get(row_id)
-                if not meta:
-                    continue
-                results.append({
-                    "content": meta.get("content", ""),
-                    "source": meta.get("source", "Unknown"),
-                    "metadata": meta.get("metadata", {}),
-                    "score": float(score),
-                })
+            scored_ids = [(float(score), int(row_id)) for score, row_id in zip(scores[0], ids[0]) if int(row_id) > 0]
+        from sqlite_index import get_vector_metadata_by_ids
+
+        metadata_by_id = get_vector_metadata_by_ids([row_id for _, row_id in scored_ids])
+        results = []
+        for score, row_id in scored_ids:
+            meta = metadata_by_id.get(row_id)
+            if not meta:
+                continue
+            results.append({
+                "content": meta.get("content", ""),
+                "source": meta.get("source", "Unknown"),
+                "metadata": meta.get("metadata", {}),
+                "score": score,
+            })
         return _apply_keyword_boost(results, query_text, k)
 
     def get_total_count(self) -> int:

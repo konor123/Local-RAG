@@ -335,6 +335,45 @@ class ResourceGuardrailTests(unittest.TestCase):
                 faiss_store.load_config = original_load_config
                 faiss_store._available_memory_bytes = original_available_memory
 
+    def test_active_turbovec_diagnostics_ignore_legacy_metadata_jsonl(self):
+        import faiss_store
+
+        original_backend = faiss_store.VECTOR_BACKEND
+        original_dir = faiss_store.TURBOVEC_INDEX_DIR
+        original_load_config = faiss_store.load_config
+        original_available_memory = faiss_store._available_memory_bytes
+        faiss_store.load_config = lambda: {"embedding": {"adaptive_eager_load": {
+            "enabled": True,
+            "available_ram_fraction": 0.50,
+            "minimum_system_reserve_mb": 4096,
+            "minimum_system_reserve_fraction": 0.15,
+            "metadata_ram_multiplier": 5.0,
+            "index_ram_multiplier": 1.15,
+            "embedding_model_reserve_mb": 768,
+            "external_model_reserve_mb": 0,
+            "transient_reserve_mb": 512,
+            "metadata_cap_ceiling_mb": 1024,
+        }}}
+        faiss_store._available_memory_bytes = lambda: 8 * 1024 * 1024 * 1024
+        with tempfile.TemporaryDirectory() as tmpdir:
+            try:
+                faiss_store.VECTOR_BACKEND = "turbovec"
+                faiss_store.TURBOVEC_INDEX_DIR = tmpdir
+                with open(os.path.join(tmpdir, "index.tvim"), "wb") as f:
+                    f.truncate(1460 * 1024 * 1024)
+                with open(os.path.join(tmpdir, "metadata.jsonl"), "wb") as f:
+                    f.truncate(860 * 1024 * 1024)
+
+                diagnostics = faiss_store.get_active_memory_load_diagnostics()
+
+                self.assertEqual(diagnostics["metadata_size_bytes"], 0)
+                self.assertTrue(diagnostics["allowed"])
+            finally:
+                faiss_store.VECTOR_BACKEND = original_backend
+                faiss_store.TURBOVEC_INDEX_DIR = original_dir
+                faiss_store.load_config = original_load_config
+                faiss_store._available_memory_bytes = original_available_memory
+
 
 if __name__ == "__main__":
     unittest.main()
