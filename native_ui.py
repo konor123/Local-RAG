@@ -18,7 +18,6 @@ import traceback
 from pathlib import Path
 from typing import Dict, List, Optional
 
-import requests
 from PySide6.QtCore import QObject, QThread, QTimer, Qt, Signal
 from PySide6.QtGui import QAction, QCloseEvent, QColor, QIcon, QPainter, QPixmap
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
@@ -41,7 +40,8 @@ from PySide6.QtWidgets import (
 
 from background_embedder import BackgroundEmbedder
 from cache_manager import CacheManager
-from config_manager import load_config, save_config
+from config_manager import get_local_ai_config, load_config, save_config
+from ollama_runtime import OllamaDiagnostic, OllamaRuntimeSupervisor, OllamaStartupError, find_ollama_executable
 from unified_engine import get_unified_response
 from _version import __version__
 from update_checker import check_for_update, download_and_prepare_update, launch_installer
@@ -49,8 +49,8 @@ from update_checker import check_for_update, download_and_prepare_update, launch
 
 APP_TITLE = "OSL AI Assistant"
 FILE_URL_PREFIX = "file-oslref:///"
-OLLAMA_URL = "http://127.0.0.1:11434"
 _ollama_process: Optional[subprocess.Popen] = None
+_ollama_runtime: Optional[OllamaRuntimeSupervisor] = None
 _SINGLE_INSTANCE_SERVER = "OSL_AI_Assistant_SingleInstance"
 
 
@@ -70,65 +70,27 @@ def _asset_path(filename: str) -> str:
 
 # ─── Ollama lifecycle ──────────────────────────────────
 def _ollama_ready(timeout: float = 1.5) -> bool:
+    """Probe the same configured endpoint used by the Ollama provider."""
     try:
-        response = requests.get(f"{OLLAMA_URL}/api/tags", timeout=timeout)
-        return response.status_code == 200
-    except Exception:
+        return OllamaRuntimeSupervisor(get_local_ai_config()["base_url"]).is_ready(timeout)
+    except (ValueError, OllamaStartupError):
         return False
 
 
 def _find_ollama_executable() -> Optional[str]:
-    candidates: List[Path] = []
-    if hasattr(sys, "_MEIPASS"):
-        candidates.append(Path(getattr(sys, "_MEIPASS")) / "ollama" / "ollama.exe")
-    if getattr(sys, "frozen", False):
-        candidates.append(Path(sys.executable).resolve().parent / "ollama" / "ollama.exe")
-    candidates.append(Path(__file__).resolve().parent / "ollama" / "ollama.exe")
-    for candidate in candidates:
-        if candidate.exists():
-            return str(candidate)
-    return shutil.which("ollama")
+    return find_ollama_executable()
 
 
 def _ensure_ollama_running() -> bool:
-    """Start bundled Ollama only when no local server is already available."""
-    global _ollama_process
-    if _ollama_ready():
-        return True
-    exe = _find_ollama_executable()
-    if not exe:
-        raise RuntimeError("Ollama 실행 파일을 찾을 수 없습니다.")
-
-    creationflags = 0
-    startupinfo = None
-    if os.name == "nt":
-        creationflags = (
-            subprocess.CREATE_NO_WINDOW
-            | subprocess.DETACHED_PROCESS
-            | subprocess.CREATE_NEW_PROCESS_GROUP
-        )
-        startupinfo = subprocess.STARTUPINFO()
-        startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-
-    _ollama_process = subprocess.Popen(
-        [exe, "serve"],
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        creationflags=creationflags,
-        startupinfo=startupinfo,
-        close_fds=True,
-    )
-    deadline = time.time() + 30
-    while time.time() < deadline:
-        if _ollama_ready(timeout=1.0):
-            return True
-        if _ollama_process.poll() is not None:
-            if _ollama_ready(timeout=1.0):
-                return True
-            break
-        time.sleep(0.75)
-    raise RuntimeError("Ollama 서버가 시작되지 않았습니다. 포트 11434를 확인하세요.")
+    """Ensure configured Ollama endpoint is available and retain owned child only."""
+    global _ollama_process, _ollama_runtime
+    try:
+        _ollama_runtime = OllamaRuntimeSupervisor(get_local_ai_config()["base_url"])
+    except ValueError as exc:
+        raise OllamaStartupError(OllamaDiagnostic("invalid_base_url", "", str(exc))) from exc
+    _ollama_runtime.ensure_running()
+    _ollama_process = _ollama_runtime.owned_process
+    return True
 
 
 def _run_hidden(args: List[str], timeout: float = 8.0) -> int:
@@ -150,9 +112,10 @@ def _stop_ollama(force: bool = True, include_name_fallback: bool = False) -> Non
     request the image-name fallback because bundled files must be unlocked before
     the installer replaces them.
     """
-    global _ollama_process
+    global _ollama_process, _ollama_runtime
     owned_process = _ollama_process
     _ollama_process = None
+    _ollama_runtime = None
     if owned_process is None and not include_name_fallback:
         return
 
@@ -532,6 +495,13 @@ class PreloadWorker(QThread):
                 except Exception as ocr_exc:
                     messages.append(f"OCR 엔진 준비 실패: {ocr_exc}")
             self.status.emit("모델 준비 완료")
+        except OllamaStartupError as exc:
+            ok = False
+            diagnostic = exc.diagnostic
+            self.status.emit(exc.diagnostic.user_message())
+            messages.append(exc.diagnostic.user_message())
+            if diagnostic.output_tail:
+                print(f"[Ollama] {diagnostic.category}: {diagnostic.output_tail}")
         except Exception as exc:
             ok = False
             messages.append(str(exc))
