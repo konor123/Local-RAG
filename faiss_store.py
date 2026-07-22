@@ -237,6 +237,18 @@ def _atomic_write_jsonl(path: str, rows: list) -> None:
     os.replace(tmp_path, path)
 
 
+def _backup_corrupt_file(path: str) -> str:
+    """Move an unreadable persisted index aside without overwriting a prior backup."""
+    timestamp = time.strftime("%Y%m%d_%H%M%S")
+    backup_path = f"{path}.corrupt.{timestamp}"
+    suffix = 1
+    while os.path.exists(backup_path):
+        backup_path = f"{path}.corrupt.{timestamp}.{suffix}"
+        suffix += 1
+    os.replace(path, backup_path)
+    return backup_path
+
+
 class VectorBackend(ABC):
     name = "base"
 
@@ -281,8 +293,17 @@ class FaissBackend(VectorBackend):
             if index_exists and meta_exists:
                 try:
                     _guard_existing_store_size(self.index_file, self.meta_file, self.name)
-                    import faiss
+                except MemoryPressureError:
+                    self._index = None
+                    self._metadata = []
+                    raise
+                except Exception as e:
+                    self._index = None
+                    self._metadata = []
+                    raise RuntimeError(f"FAISS index could not pass load safeguards: {e}") from e
 
+                import faiss
+                try:
                     self._index = faiss.read_index(self.index_file)
                     self._metadata = []
                     with open(self.meta_file, "r", encoding="utf-8") as f:
@@ -292,14 +313,18 @@ class FaissBackend(VectorBackend):
                                 self._metadata.append(json.loads(line))
                     print(f"[VectorStore:faiss] Loaded index: {self._index.ntotal:,} vectors, {len(self._metadata):,} metadata entries")
                     return True
-                except MemoryPressureError:
-                    self._index = None
-                    self._metadata = []
-                    raise
                 except Exception as e:
                     self._index = None
                     self._metadata = []
-                    raise RuntimeError(f"FAISS index exists but failed to load; refusing to create an empty replacement: {e}") from e
+                    index_backup = _backup_corrupt_file(self.index_file)
+                    metadata_backup = _backup_corrupt_file(self.meta_file)
+                    self._index = faiss.IndexFlatIP(VECTOR_DIM)
+                    print(
+                        f"[VectorStore:faiss] WARNING: persisted store was unreadable ({e}). "
+                        f"Backed up index to {index_backup} and metadata to {metadata_backup}; "
+                        "created a fresh empty index."
+                    )
+                    return True
             if index_exists != meta_exists:
                 raise RuntimeError(
                     f"FAISS index is incomplete: index_file_exists={index_exists}, metadata_file_exists={meta_exists}"
@@ -318,7 +343,9 @@ class FaissBackend(VectorBackend):
             self._ensure_dir()
             import faiss
 
-            faiss.write_index(self._index, self.index_file)
+            tmp_index_file = f"{self.index_file}.tmp"
+            faiss.write_index(self._index, tmp_index_file)
+            os.replace(tmp_index_file, self.index_file)
             _atomic_write_jsonl(self.meta_file, self._metadata)
             self._dirty = False
             print(f"[VectorStore:faiss] Saved index: {self._index.ntotal:,} vectors")
@@ -403,36 +430,50 @@ class TurboVecBackend(VectorBackend):
             if index_exists:
                 try:
                     _guard_existing_store_size(self.index_file, "", self.name)
-                    vector_metadata_count = None
-                    if meta_exists:
-                        from sqlite_index import get_vector_metadata_count
-
-                        vector_metadata_count = get_vector_metadata_count()
-                        if vector_metadata_count == 0:
-                            raise RuntimeError(
-                                "Legacy TurboVec metadata.jsonl detected without SQLite vector metadata. "
-                                "Delete index.tvim, metadata.jsonl, processed_files_turbovec.txt, and metadata_index.sqlite3, "
-                                "then run a full reindex."
-                            )
-                    self._index = IdMapIndex.load(self.index_file)
-                    if len(self._index) and vector_metadata_count is None:
-                        from sqlite_index import get_vector_metadata_count
-
-                        vector_metadata_count = get_vector_metadata_count()
-                    if len(self._index) and not vector_metadata_count:
-                        raise RuntimeError(
-                            "TurboVec index has vectors but no SQLite vector metadata. "
-                            "Delete index.tvim, metadata.jsonl, processed_files_turbovec.txt, and metadata_index.sqlite3, "
-                            "then run a full reindex."
-                        )
-                    print(f"[VectorStore:turbovec] Loaded index: {len(self._index):,} vectors (SQLite metadata)")
-                    return True
                 except MemoryPressureError:
                     self._index = None
                     raise
                 except Exception as e:
                     self._index = None
-                    raise RuntimeError(f"TurboVec index exists but failed to load; refusing to create an empty replacement: {e}") from e
+                    raise RuntimeError(f"TurboVec index could not pass load safeguards: {e}") from e
+
+                vector_metadata_count = None
+                if meta_exists:
+                    from sqlite_index import get_vector_metadata_count
+
+                    vector_metadata_count = get_vector_metadata_count()
+                    if vector_metadata_count == 0:
+                        raise RuntimeError(
+                            "Legacy TurboVec metadata.jsonl detected without SQLite vector metadata. "
+                            "Delete index.tvim, metadata.jsonl, processed_files_turbovec.txt, and metadata_index.sqlite3, "
+                            "then run a full reindex."
+                        )
+
+                try:
+                    self._index = IdMapIndex.load(self.index_file)
+                except Exception as e:
+                    self._index = None
+                    index_backup = _backup_corrupt_file(self.index_file)
+                    self._index = self._new_index()
+                    print(
+                        f"[VectorStore:turbovec] WARNING: persisted index was unreadable ({e}). "
+                        f"Backed up index to {index_backup}; created a fresh empty index."
+                    )
+                    return True
+
+                if len(self._index) and vector_metadata_count is None:
+                    from sqlite_index import get_vector_metadata_count
+
+                    vector_metadata_count = get_vector_metadata_count()
+                if len(self._index) and not vector_metadata_count:
+                    self._index = None
+                    raise RuntimeError(
+                        "TurboVec index has vectors but no SQLite vector metadata. "
+                        "Delete index.tvim, metadata.jsonl, processed_files_turbovec.txt, and metadata_index.sqlite3, "
+                        "then run a full reindex."
+                    )
+                print(f"[VectorStore:turbovec] Loaded index: {len(self._index):,} vectors (SQLite metadata)")
+                return True
             self._index = self._new_index()
             print(f"[VectorStore:turbovec] Created new index (dim={VECTOR_DIM}, bit_width={TURBOVEC_BIT_WIDTH})")
             return True

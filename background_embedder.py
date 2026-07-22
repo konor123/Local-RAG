@@ -24,6 +24,7 @@ os.environ["ANONYMIZED_TELEMETRY"] = "False"
 PROCESSED_FILE = os.environ.get("PROCESSED_FILES_PATH", runtime_path("processed_files.txt"))
 VECTOR_STORE_PATH = os.environ.get("VECTOR_STORE_PATH", runtime_path("chroma_db_ko"))
 LOG_FILE = os.environ.get("EMBED_LOG_PATH", runtime_path("logs", "embed_log.txt"))
+EMBEDDING_MODEL_NAME = "dragonkue/multilingual-e5-small-ko"
 
 # 임베딩 가능한 확장자
 EMBEDDABLE_EXTENSIONS = {
@@ -325,7 +326,7 @@ class BackgroundEmbedder:
             from langchain_community.embeddings import HuggingFaceEmbeddings
             
             self._model = HuggingFaceEmbeddings(
-                model_name="dragonkue/multilingual-e5-small-ko",
+                model_name=EMBEDDING_MODEL_NAME,
                 model_kwargs={'device': 'cpu'},
                 encode_kwargs={'normalize_embeddings': True}
             )

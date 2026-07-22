@@ -1,6 +1,9 @@
 import os
+import sys
 import tempfile
+import types
 import unittest
+from unittest.mock import patch
 
 
 class ResourceGuardrailTests(unittest.TestCase):
@@ -268,6 +271,127 @@ class ResourceGuardrailTests(unittest.TestCase):
                     backend.load_index()
             finally:
                 faiss_store._guard_existing_store_size = original_guard
+
+    def test_faiss_save_is_atomic(self):
+        import faiss_store
+
+        class FakeIndex:
+            def __init__(self, dim):
+                self.dim = dim
+                self.ntotal = 1
+
+        written_paths = []
+
+        def write_index(index, path):
+            written_paths.append(path)
+            with open(path, "wb") as f:
+                f.write(b"fake faiss index")
+
+        fake_faiss = types.SimpleNamespace(IndexFlatIP=FakeIndex, write_index=write_index)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            backend = faiss_store.FaissBackend()
+            backend.index_dir = tmpdir
+            backend.index_file = os.path.join(tmpdir, "index.faiss")
+            backend.meta_file = os.path.join(tmpdir, "metadata.jsonl")
+            backend._index = FakeIndex(faiss_store.VECTOR_DIM)
+            backend._metadata = [{"content": "fixture", "source": "fixture.txt", "metadata": {}}]
+
+            with patch.dict(sys.modules, {"faiss": fake_faiss}):
+                backend.save_index()
+
+            self.assertEqual(written_paths, [f"{backend.index_file}.tmp"])
+            self.assertTrue(os.path.exists(backend.index_file))
+            self.assertFalse(os.path.exists(f"{backend.index_file}.tmp"))
+
+    def test_faiss_load_recovers_from_corruption(self):
+        import faiss_store
+
+        class FakeIndex:
+            def __init__(self, dim):
+                self.dim = dim
+                self.ntotal = 0
+
+        def read_index(path):
+            raise RuntimeError("corrupt faiss data")
+
+        fake_faiss = types.SimpleNamespace(IndexFlatIP=FakeIndex, read_index=read_index)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            backend = faiss_store.FaissBackend()
+            backend.index_dir = tmpdir
+            backend.index_file = os.path.join(tmpdir, "index.faiss")
+            backend.meta_file = os.path.join(tmpdir, "metadata.jsonl")
+            with open(backend.index_file, "wb") as f:
+                f.write(b"corrupt faiss data")
+            with open(backend.meta_file, "w", encoding="utf-8") as f:
+                f.write('{"content":"fixture","source":"fixture.txt","metadata":{}}\n')
+
+            original_guard = faiss_store._guard_existing_store_size
+            faiss_store._guard_existing_store_size = lambda *args: None
+            try:
+                with patch.dict(sys.modules, {"faiss": fake_faiss}):
+                    self.assertTrue(backend.load_index())
+            finally:
+                faiss_store._guard_existing_store_size = original_guard
+
+            self.assertEqual(backend._index.ntotal, 0)
+            self.assertEqual(backend._metadata, [])
+            self.assertFalse(os.path.exists(backend.index_file))
+            self.assertFalse(os.path.exists(backend.meta_file))
+            self.assertTrue(any(name.startswith("index.faiss.corrupt.") for name in os.listdir(tmpdir)))
+            self.assertTrue(any(name.startswith("metadata.jsonl.corrupt.") for name in os.listdir(tmpdir)))
+
+    def test_faiss_missing_dependency_preserves_persisted_files(self):
+        import faiss_store
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            backend = faiss_store.FaissBackend()
+            backend.index_dir = tmpdir
+            backend.index_file = os.path.join(tmpdir, "index.faiss")
+            backend.meta_file = os.path.join(tmpdir, "metadata.jsonl")
+            with open(backend.index_file, "wb") as f:
+                f.write(b"fixture")
+            with open(backend.meta_file, "w", encoding="utf-8") as f:
+                f.write("{}\n")
+
+            original_guard = faiss_store._guard_existing_store_size
+            faiss_store._guard_existing_store_size = lambda *args: None
+            try:
+                with patch.dict(sys.modules, {"faiss": None}):
+                    with self.assertRaises(ModuleNotFoundError):
+                        backend.load_index()
+            finally:
+                faiss_store._guard_existing_store_size = original_guard
+
+            self.assertTrue(os.path.exists(backend.index_file))
+            self.assertTrue(os.path.exists(backend.meta_file))
+            self.assertFalse(any(".corrupt." in name for name in os.listdir(tmpdir)))
+
+    def test_faiss_load_preserves_oversize_guard(self):
+        import faiss_store
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            backend = faiss_store.FaissBackend()
+            backend.index_dir = tmpdir
+            backend.index_file = os.path.join(tmpdir, "index.faiss")
+            backend.meta_file = os.path.join(tmpdir, "metadata.jsonl")
+            with open(backend.index_file, "wb") as f:
+                f.write(b"fixture")
+            with open(backend.meta_file, "w", encoding="utf-8") as f:
+                f.write("{}\n")
+
+            original_guard = faiss_store._guard_existing_store_size
+            faiss_store._guard_existing_store_size = lambda *args: (_ for _ in ()).throw(RuntimeError("too large"))
+            try:
+                with self.assertRaisesRegex(RuntimeError, "could not pass load safeguards: too large"):
+                    backend.load_index()
+            finally:
+                faiss_store._guard_existing_store_size = original_guard
+
+            self.assertTrue(os.path.exists(backend.index_file))
+            self.assertTrue(os.path.exists(backend.meta_file))
+            self.assertFalse(any(".corrupt." in name for name in os.listdir(tmpdir)))
 
     def test_adaptive_memory_budget_allows_small_store_at_8gb_available(self):
         import faiss_store

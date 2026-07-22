@@ -144,6 +144,40 @@ class UnifiedOrchestrationTests(unittest.TestCase):
 
         self.assertEqual(executed, ["content", "file"])
 
+    def test_jit_skips_remaining_files_after_vectorstore_failure(self):
+        calls = []
+
+        class FailingEmbedder:
+            def process_single_file_synchronous(self, path):
+                calls.append(path)
+                return {
+                    "success": False,
+                    "category": "embedding_error",
+                    "detail": "VectorStore load failed: corrupt index",
+                }
+
+        self.engine.BackgroundEmbedder = FailingEmbedder
+        self.engine.EMBEDDABLE_EXTENSIONS = {".pdf"}
+        events = []
+        original_processed_path = os.environ.get("PROCESSED_FILES_PATH")
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", delete=False) as processed_file:
+            processed_path = processed_file.name
+        os.environ["PROCESSED_FILES_PATH"] = processed_path
+        try:
+            self.engine._perform_jit_ingestion(
+                [{"path": "first.pdf"}, {"path": "second.pdf"}],
+                events,
+            )
+        finally:
+            if original_processed_path is None:
+                os.environ.pop("PROCESSED_FILES_PATH", None)
+            else:
+                os.environ["PROCESSED_FILES_PATH"] = original_processed_path
+            os.remove(processed_path)
+
+        self.assertEqual(calls, ["first.pdf"])
+        self.assertTrue(any("나머지 1개 파일" in event["content"] for event in events))
+
     def test_tools_plan_without_file_gets_generic_file_safety_net(self):
         executed = []
         self.engine._plan_query = lambda question, history=None: {

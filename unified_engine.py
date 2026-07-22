@@ -585,20 +585,28 @@ def _perform_jit_ingestion(file_results: List[Dict], events: List[Dict]):
             events.append({"type": "thinking", "content": f"🆕 미학습 파일 {len(missing)}개 발견! 즉시 학습을 시작합니다..."})
             embedder = BackgroundEmbedder()
             
-            for path in missing:
+            for index, path in enumerate(missing):
                 fname = os.path.basename(path)
                 events.append({"type": "thinking", "content": f"⚡ [JIT] '{fname}' 학습 중..."})
                 result = embedder.process_single_file_synchronous(path)
                 success = result.get("success") if isinstance(result, dict) else bool(result)
                 if success:
-                     events.append({"type": "thinking", "content": f"✅ [JIT] '{fname}' 완료"})
+                    events.append({"type": "thinking", "content": f"✅ [JIT] '{fname}' 완료"})
                 else:
-                     category = result.get("category", "unknown_error") if isinstance(result, dict) else "unknown_error"
-                     detail = result.get("detail", "") if isinstance(result, dict) else ""
-                     suffix = f" ({category})" if category else ""
-                     if detail:
-                         suffix += f": {str(detail)[:200]}"
-                     events.append({"type": "error", "content": f"[JIT] '{fname}' 실패{suffix}"})
+                    category = result.get("category", "unknown_error") if isinstance(result, dict) else "unknown_error"
+                    detail = result.get("detail", "") if isinstance(result, dict) else ""
+                    suffix = f" ({category})" if category else ""
+                    if detail:
+                        suffix += f": {str(detail)[:200]}"
+                    events.append({"type": "error", "content": f"[JIT] '{fname}' 실패{suffix}"})
+                    if category == "embedding_error":
+                        remaining = len(missing) - index - 1
+                        if remaining > 0:
+                            events.append({
+                                "type": "thinking",
+                                "content": f"⏭️ VectorStore 로드 실패로 나머지 {remaining}개 파일 학습을 건너뜁니다.",
+                            })
+                        break
                      
     except Exception as e:
         events.append({"type": "thinking", "content": f"⚠️ JIT Error: {e}"})
