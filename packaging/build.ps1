@@ -28,6 +28,7 @@ $Packaging   = $PSScriptRoot
 $Deps        = Join-Path $Packaging "deps"
 $Dist        = Join-Path $ProjectRoot "dist"
 $Build       = Join-Path $ProjectRoot "build"
+$Output      = Join-Path $Packaging "output"
 
 # ── helpers ────────────────────────────────────────────────────
 function Step([string] $msg) {
@@ -126,12 +127,11 @@ if ($SkipInnoSetup) {
     Step "Skipping Inno Setup (--SkipInnoSetup)"
 } else {
     Step "Cleaning previous Inno Setup outputs"
-    $output = Join-Path $Packaging "output"
-    if (Test-Path $output) {
-        Remove-Item -LiteralPath $output -Recurse -Force
-        Ok "removed $output"
+    if (Test-Path $Output) {
+        Remove-Item -LiteralPath $Output -Recurse -Force
+        Ok "removed $Output"
     }
-    New-Item -ItemType Directory -Path $output -Force | Out-Null
+    New-Item -ItemType Directory -Path $Output -Force | Out-Null
 
     Step "Compiling Inno Setup installer"
     $iscc = (Get-Command iscc.exe -ErrorAction SilentlyContinue)
@@ -153,8 +153,8 @@ if ($SkipInnoSetup) {
 
 # ── 6. summary ────────────────────────────────────────────────
 Step "Build complete"
-if (Test-Path $output) {
-    Get-ChildItem $output | ForEach-Object { Ok "$($_.FullName)" }
+if (Test-Path $Output) {
+    Get-ChildItem $Output | ForEach-Object { Ok "$($_.FullName)" }
 } else {
     Write-Host "    Run packaging\installer.iss through Inno Setup GUI to produce the installer." -ForegroundColor Yellow
 }
