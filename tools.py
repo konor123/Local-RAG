@@ -711,7 +711,35 @@ def search_content(query: str, k: int = 4) -> Dict:
                 "metadata": doc.get("metadata", {}),
                 "score": doc.get("score", 0)
             })
-        
+
+        # Atom hits are candidates only: atom_index promotes them to active
+        # parent chunks before they can enter this public result contract.
+        try:
+            from atom_index import search_parent_chunks
+
+            atom_parents = search_parent_chunks(query_vector, query, k=k) if len(results) < k else []
+            seen_parent_ids = {item.get("metadata", {}).get("parent_chunk_id") for item in results}
+            for parent in atom_parents:
+                parent_id = parent.get("metadata", {}).get("parent_chunk_id")
+                if parent_id and parent_id in seen_parent_ids:
+                    continue
+                sources.add(parent.get("source", "Unknown"))
+                results.append({
+                    "content": parent.get("content", "")[:500],
+                    "source": parent.get("source", "Unknown"),
+                    "metadata": parent.get("metadata", {}),
+                    "score": parent.get("score", 0),
+                    "source_engine": parent.get("source_engine", "atom_parent_vector"),
+                })
+                if parent_id:
+                    seen_parent_ids.add(parent_id)
+                if len(results) >= k:
+                    break
+        except Exception:
+            # Atom indexing is an optional candidate source; retain the
+            # established main-vector result contract on any atom failure.
+            pass
+
         return {
             "query": query,
             "count": len(results),

@@ -1253,12 +1253,24 @@ def ingest_data():
                             "vector": embeddings[i],
                             "metadata": metadatas[i]
                         })
+
+                    if vector_docs:
+                        from atomizer import assign_parent_chunk_ids
+
+                        assign_parent_chunk_ids(vector_docs)
                     
                     if vector_docs and INDEX_SAMPLE_WRITE:
                         add_documents(vector_docs)
                         save_index()
                         if get_backend_name() != "turbovec":
                             record_sidecar_chunks_by_source(vector_docs)
+                        try:
+                            from atom_index import index_documents
+                            from rag_engine import get_embeddings
+
+                            index_documents(vector_docs, get_embeddings().embed_documents)
+                        except Exception as atom_error:
+                            print(f"   [Writer] Atom indexing skipped: {atom_error}")
                         vector_write_success = True
                     elif vector_docs:
                         print(f"   [Writer] Sample report-only: skipped vector write for {len(vector_docs)} chunks")

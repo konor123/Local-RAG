@@ -506,10 +506,19 @@ class BackgroundEmbedder:
                     })
             
             if final_docs:
+                from atomizer import assign_parent_chunk_ids
+
+                assign_parent_chunk_ids(final_docs)
                 add_documents(final_docs)
                 save_index()  # 매 파일마다 저장 (크래시 방지)
                 if get_backend_name() != "turbovec":
                     self._record_sidecar_chunks(filepath, final_docs)
+                try:
+                    from atom_index import index_documents
+
+                    index_documents(final_docs, self._model.embed_documents)
+                except Exception as atom_error:
+                    _log.warning(f"WARN (atom indexing skipped): {self._current_file} | {str(atom_error)[:100]}")
                 self._processed_count += 1
                 self._record_status(filepath, "ok")
                 _log.info(f"OK ({len(final_docs)} chunks): {self._current_file}")

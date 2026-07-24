@@ -24,11 +24,14 @@ VECTOR_BACKEND_FALLBACK = os.environ.get("VECTOR_BACKEND_FALLBACK", "").strip().
 VECTOR_BACKEND_STRICT = os.environ.get("VECTOR_BACKEND_STRICT", "true").strip().lower() in ("1", "true", "yes", "y")
 
 FAISS_INDEX_DIR = os.environ.get("FAISS_INDEX_DIR", runtime_path("faiss_index"))
+ATOM_INDEX_DIR = os.environ.get("ATOM_INDEX_DIR", runtime_path("atom_index"))
 TURBOVEC_INDEX_DIR = os.environ.get("TURBOVEC_INDEX_DIR", runtime_path("turbovec_index"))
 TURBOVEC_BIT_WIDTH = int(os.environ.get("TURBOVEC_BIT_WIDTH", "4") or 4)
 
 _backend_lock = threading.RLock()
 _backend = None
+_atom_backend_lock = threading.RLock()
+_atom_backend = None
 _fallback_active = False
 _backend_load_failed_until = 0.0
 _backend_last_error = ""
@@ -271,8 +274,8 @@ class VectorBackend(ABC):
 class FaissBackend(VectorBackend):
     name = "faiss"
 
-    def __init__(self):
-        self.index_dir = FAISS_INDEX_DIR
+    def __init__(self, index_dir: str = None):
+        self.index_dir = index_dir or FAISS_INDEX_DIR
         self.index_file = os.path.join(self.index_dir, "index.faiss")
         self.meta_file = os.path.join(self.index_dir, "metadata.jsonl")
         self._lock = threading.RLock()
@@ -615,6 +618,17 @@ def _get_backend() -> VectorBackend:
         return _backend
 
 
+def _get_atom_backend() -> FaissBackend:
+    """Lazily load the isolated FAISS backend for atom candidates only."""
+    global _atom_backend
+    with _atom_backend_lock:
+        if _atom_backend is None:
+            backend = FaissBackend(index_dir=ATOM_INDEX_DIR)
+            backend.load_index()
+            _atom_backend = backend
+        return _atom_backend
+
+
 def load_index():
     """Active vector backend load."""
     return _get_backend().load_index()
@@ -646,6 +660,25 @@ def get_total_count() -> int:
 def get_backend_name() -> str:
     """Return active backend name for diagnostics."""
     return _get_backend().name
+
+
+def add_atom_documents(documents: list):
+    """Write atom vectors to their isolated FAISS index."""
+    return _get_atom_backend().add_documents(documents)
+
+
+def save_atom_index():
+    """Persist the isolated atom FAISS index."""
+    return _get_atom_backend().save_index()
+
+
+def search_atoms(query_vector: list, query_text: str = "", k: int = 5) -> list:
+    """Search atom candidates; callers must resolve parent chunks before use."""
+    return _get_atom_backend().search_similar(query_vector, query_text, k)
+
+
+def get_atom_total_count() -> int:
+    return _get_atom_backend().get_total_count()
 
 
 if __name__ == "__main__":

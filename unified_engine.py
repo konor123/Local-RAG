@@ -24,11 +24,27 @@ from direct_read import direct_read_candidates
 from conversation_logger import conversation_logger
 from ai_providers.provider_manager import get_provider
 from config_manager import load_config
+from complexity_router import classify_complexity
 from search_terms import build_glob_patterns, extract_search_tokens
 
 # --- Configuration ---
 MAX_WORKERS = 3  # 병렬 실행 스레드 수
 CONTENT_SEARCH_TIMEOUT = 60  # content search 최대 대기 시간(초)
+FACTUAL_FAST_PATH_MIN_SCORE = 0.35
+
+
+def _should_escalate_factual_result(data: Dict) -> bool:
+    """Return whether a factual fast-path result needs the LLM planner safety net."""
+    result = data.get("result", {}) if isinstance(data, dict) else {}
+    if int(result.get("count", 0) or 0) <= 0:
+        return True
+
+    scores = []
+    for item in result.get("results", []):
+        score = item.get("score") if isinstance(item, dict) else None
+        if isinstance(score, (int, float)):
+            scores.append(float(score))
+    return bool(scores) and max(scores) < FACTUAL_FAST_PATH_MIN_SCORE
 
 
 def _search_config() -> Dict:
@@ -197,6 +213,76 @@ def _summarize_execution_results(execution_results: List[Dict], max_chars: int =
     return json.dumps(summary, ensure_ascii=False, default=str)[:max_chars]
 
 
+def _retrieved_source_paths(execution_results: List[Dict]) -> Dict[str, str]:
+    """Return normalized source paths exposed by the actual retrieval results."""
+    allowed = {}
+    for item in execution_results:
+        data = item.get("data", {}) if isinstance(item, dict) else {}
+        result = data.get("result", {}) if isinstance(data, dict) else {}
+        for row in result.get("results", []) if isinstance(result, dict) else []:
+            if not isinstance(row, dict):
+                continue
+            source_path = str(row.get("source") or row.get("path") or "").strip()
+            if source_path:
+                allowed[os.path.normcase(os.path.normpath(source_path))] = source_path
+    return allowed
+
+
+def _normalize_evidence_ledger_entry(
+    review: Dict,
+    round_index: int,
+    execution_results: List[Dict],
+) -> Dict:
+    """Retain only source paths that are grounded in retrieval results."""
+    if not isinstance(review, dict):
+        return {}
+
+    allowed_sources = _retrieved_source_paths(execution_results)
+    selected_sources = []
+    raw_facts = review.get("confirmed_facts", [])
+    for item in raw_facts if isinstance(raw_facts, list) else []:
+        if not isinstance(item, dict):
+            continue
+        candidate = str(item.get("source_path") or item.get("source") or "").strip()
+        source_path = allowed_sources.get(os.path.normcase(os.path.normpath(candidate))) if candidate else None
+        if source_path and source_path not in selected_sources:
+            selected_sources.append(source_path)
+        if len(selected_sources) >= 10:
+            break
+
+    missing = []
+    raw_missing = review.get("missing", [])
+    for item in raw_missing if isinstance(raw_missing, list) else []:
+        text = str(item or "").strip()
+        if text:
+            missing.append(text[:300])
+        if len(missing) >= 10:
+            break
+
+    rationale = str(review.get("rationale") or "").strip()[:500]
+    if not (selected_sources or missing or rationale):
+        return {}
+    return {
+        "round": round_index,
+        "selected_sources": selected_sources,
+        "missing": missing,
+        "rationale": rationale,
+    }
+
+
+def _format_evidence_ledger(evidence_ledger: List[Dict], max_chars: int = 1000) -> str:
+    """Format source-linked review state without presenting LLM claims as facts."""
+    lines = ["=== 검토된 근거 상태 (검색 결과로 재확인 필요) ==="]
+    for entry in evidence_ledger:
+        for source in entry.get("selected_sources", []):
+            lines.append(f"- 검토에서 선택된 근거 문서: {source}")
+        for missing in entry.get("missing", []):
+            lines.append(f"- 미확인 정보: {missing}")
+        if entry.get("rationale"):
+            lines.append(f"- 진행 요약: {entry['rationale']}")
+    return "\n".join(lines)[:max_chars]
+
+
 def _answer_direct(question: str, chat_history: List[tuple] = None) -> Generator[Dict, None, None]:
     history_str = ""
     if chat_history:
@@ -215,6 +301,7 @@ def _review_tool_results(
     execution_results: List[Dict],
     chat_history: List[tuple] = None,
     round_index: int = 1,
+    evidence_ledger: List[Dict] = None,
 ) -> Dict:
     """Ask the LLM whether to answer, search more, or give up after a tool round."""
     history_str = ""
@@ -239,7 +326,11 @@ def _review_tool_results(
     system_prompt = """당신은 검색 전략 검토자입니다. 검색 결과를 보고 다음 행동을 JSON으로만 결정하세요.
 허용 action: "answer", "search_more", "give_up".
 search_more를 선택할 때만 sub_queries를 포함하세요. type은 file, content, hybrid 중 하나입니다.
-이미 충분한 근거가 있으면 answer를 선택하세요. 같은 검색을 반복하지 마세요."""
+이미 충분한 근거가 있으면 answer를 선택하세요. 같은 검색을 반복하지 마세요.
+복합 검색에서는 선택적으로 confirmed_facts, missing, rationale을 포함하세요.
+confirmed_facts는 [{"fact":"확인된 사실","source_path":"검색 결과 출처","chunk":"청크 식별자"}] 형식이며,
+검색 결과에 실제로 있는 내용만 기록하세요. missing은 아직 확인되지 않은 항목의 문자열 배열입니다.
+rationale은 자유형 추론이 아닌 다음 검색에 필요한 한 줄 진행 요약입니다."""
     prompt = f"""대화 기록:
 {history_str}
 
@@ -248,9 +339,12 @@ search_more를 선택할 때만 sub_queries를 포함하세요. type은 file, co
 검색 결과 요약 JSON:
 {_summarize_execution_results(execution_results)}
 
+기존 근거 상태:
+{_format_evidence_ledger(evidence_ledger or []) if evidence_ledger else "없음"}
+
 출력 예:
 {{"action":"answer","reason":"충분한 근거 확보"}}
-{{"action":"search_more","reason":"검색 결과 부족","sub_queries":[{{"type":"content","query":"수정 검색어","reason":"다른 표현으로 재검색"}}]}}
+{{"action":"search_more","reason":"검색 결과 부족","sub_queries":[{{"type":"content","query":"수정 검색어","reason":"다른 표현으로 재검색"}}],"confirmed_facts":[{{"fact":"확인된 사실","source_path":"문서.pdf","chunk":"p.1"}}],"missing":["추가 확인 항목"],"rationale":"다음 검색으로 누락 항목 확인"}}
 {{"action":"give_up","reason":"관련 근거 없음"}}
 """
     try:
@@ -270,6 +364,62 @@ def get_unified_response(
     """
     yield {"type": "thinking", "content": "🤔 LLM이 응답/검색 전략을 수립 중..."}
 
+    history_str = ""
+    if chat_history:
+        for role, msg in chat_history[-3:]:
+            history_str += f"{role}: {msg}\n"
+    complexity_tier = classify_complexity(question, history_str)
+    execution_results: List[Dict] = []
+    final_answer = ""
+    fast_path_escalated = False
+    fast_path_record = None
+
+    if complexity_tier == "factual":
+        fast_path_query = {
+            "type": "content",
+            "query": question,
+            "reason": "High-confidence factual fast path",
+        }
+        yield {"type": "thinking", "content": "⚡ 사실 조회 질문으로 판단하여 단일 내용 검색을 실행합니다..."}
+        fast_path_data = {}
+        for event, data in _execute_sub_query_streaming(fast_path_query, allow_jit=False):
+            if event is not None:
+                yield event
+            if data is not None:
+                fast_path_data = data
+
+        fast_path_item = {"sub_query": fast_path_query, "data": fast_path_data}
+        execution_results.append(fast_path_item)
+        fast_path_record = {
+            "round": 0,
+            "sub_queries": [fast_path_query],
+            "results": [{
+                "type": fast_path_data.get("type") if isinstance(fast_path_data, dict) else None,
+                "count": fast_path_data.get("result", {}).get("count", 0) if isinstance(fast_path_data, dict) else 0,
+            }],
+        }
+
+        if not _should_escalate_factual_result(fast_path_data):
+            plan_trace = {
+                "mode": "tools",
+                "complexity_tier": complexity_tier,
+                "fast_path": True,
+                "fast_path_escalated": False,
+                "rounds": [fast_path_record],
+                "initial_plan": {"mode": "tools", "sub_queries": [fast_path_query]},
+            }
+            yield {"type": "thinking", "content": "🧠 LLM이 수집된 근거를 종합하여 답변을 생성합니다..."}
+            for event in _synthesize_answer(question, execution_results, chat_history):
+                if event.get("type") == "answer":
+                    final_answer = event.get("content", "")
+                yield event
+            is_success = bool(final_answer) and "죄송합니다" not in final_answer and "정보를 찾을 수 없습니다" not in final_answer
+            conversation_logger.log_interaction(question=question, plan=plan_trace, answer=final_answer, success=is_success)
+            return
+
+        fast_path_escalated = True
+        yield {"type": "thinking", "content": "⚠️ 초기 사실 검색 근거가 부족하여 확장 검색 계획으로 전환합니다..."}
+
     raw_plan = _plan_query(question, chat_history)
     plan = _normalize_llm_plan(raw_plan)
     if not plan:
@@ -278,9 +428,14 @@ def get_unified_response(
     else:
         plan = _ensure_file_search_safety_net(plan, question)
 
-    plan_trace = {"mode": plan.get("mode", "tools"), "rounds": [], "initial_plan": plan}
-    execution_results: List[Dict] = []
-    final_answer = ""
+    plan_trace = {
+        "mode": plan.get("mode", "tools"),
+        "complexity_tier": complexity_tier,
+        "fast_path": False,
+        "fast_path_escalated": fast_path_escalated,
+        "rounds": [fast_path_record] if fast_path_record else [],
+        "initial_plan": plan,
+    }
 
     if plan.get("mode") == "direct":
         yield {"type": "thinking", "content": f"💬 LLM 판단: 검색 없이 답변합니다. ({plan.get('reason', '')})"}
@@ -293,8 +448,11 @@ def get_unified_response(
         return
 
     current_queries = _coerce_sub_queries(plan.get("sub_queries", []))
-    seen_calls = set()
+    seen_calls = {("content", question)} if fast_path_escalated else set()
     total_tool_calls = 0
+    evidence_ledger: List[Dict] = []
+    ledger_active = False
+    terminal_round_had_results = False
 
     def run_query(sq: Dict, allow_jit: bool = True) -> Dict:
         final_data = {}
@@ -332,17 +490,40 @@ def get_unified_response(
 
         plan_trace["rounds"].append(round_record)
         if round_index >= MAX_PLANNING_ROUNDS:
+            terminal_round_had_results = ledger_active and any(
+                result.get("count", 0) > 0 for result in round_record["results"]
+            )
             break
 
         yield {"type": "thinking", "content": "🧭 LLM이 검색 결과를 검토하고 다음 전략을 결정 중..."}
-        review = _review_tool_results(question, execution_results, chat_history, round_index=round_index)
+        if evidence_ledger:
+            review = _review_tool_results(
+                question,
+                execution_results,
+                chat_history,
+                round_index=round_index,
+                evidence_ledger=evidence_ledger,
+            )
+        else:
+            review = _review_tool_results(question, execution_results, chat_history, round_index=round_index)
         round_record["review"] = review
         action = str(review.get("action") or "answer").strip().lower()
         if action == "search_more":
             next_queries = _coerce_sub_queries(review.get("sub_queries", []))
             if next_queries:
+                if complexity_tier == "complex":
+                    ledger_active = True
+                    ledger_entry = _normalize_evidence_ledger_entry(review, round_index, execution_results)
+                    if ledger_entry:
+                        evidence_ledger.append(ledger_entry)
+                        round_record["ledger"] = ledger_entry
                 current_queries = next_queries
                 continue
+        if complexity_tier == "complex" and ledger_active:
+            ledger_entry = _normalize_evidence_ledger_entry(review, round_index, execution_results)
+            if ledger_entry:
+                evidence_ledger.append(ledger_entry)
+                round_record["ledger"] = ledger_entry
         if action == "give_up":
             final_answer = review.get("answer") or f"관련 근거를 충분히 찾지 못했습니다. ({review.get('reason', '검색 결과 부족')})"
             yield {"type": "answer", "content": final_answer, "sources": [], "source_count": 0}
@@ -351,7 +532,18 @@ def get_unified_response(
 
     if not final_answer:
         yield {"type": "thinking", "content": "🧠 LLM이 수집된 근거를 종합하여 답변을 생성합니다..."}
-        for event in _synthesize_answer(question, execution_results, chat_history):
+        synthesis_args = (question, execution_results, chat_history)
+        synthesis_ledger = evidence_ledger
+        if evidence_ledger and terminal_round_had_results:
+            synthesis_ledger = [
+                {**entry, "selected_sources": list(entry.get("selected_sources", [])), "missing": [], "rationale": ""}
+                for entry in evidence_ledger
+            ]
+        if synthesis_ledger:
+            synthesis = _synthesize_answer(*synthesis_args, evidence_ledger=synthesis_ledger)
+        else:
+            synthesis = _synthesize_answer(*synthesis_args)
+        for event in synthesis:
             if event.get('type') == 'answer':
                 final_answer = event.get('content', '')
             yield event
@@ -611,7 +803,12 @@ def _perform_jit_ingestion(file_results: List[Dict], events: List[Dict]):
     except Exception as e:
         events.append({"type": "thinking", "content": f"⚠️ JIT Error: {e}"})
 
-def _synthesize_answer(question: str, execution_results: List[Dict], chat_history: List[tuple]) -> Generator:
+def _synthesize_answer(
+    question: str,
+    execution_results: List[Dict],
+    chat_history: List[tuple],
+    evidence_ledger: List[Dict] = None,
+) -> Generator:
     """
     모든 실행 결과를 종합하여 최종 답변을 생성합니다.
     """
@@ -691,7 +888,13 @@ def _synthesize_answer(question: str, execution_results: List[Dict], chat_histor
         }
         return
 
-    full_context = "\n\n".join(context_parts)
+    retrieved_context = "\n\n".join(context_parts)
+    ledger_context = _format_evidence_ledger(evidence_ledger) if evidence_ledger else ""
+    context_sections = []
+    if ledger_context:
+        context_sections.append(ledger_context)
+    context_sections.append(retrieved_context)
+    full_context = "\n\n".join(context_sections)
     
     # 대화 기록 포맷팅
     history_str = ""
@@ -733,7 +936,10 @@ def _synthesize_answer(question: str, execution_results: List[Dict], chat_histor
 Current Question: {question}
 
 Research Results:
-{full_context[:6000]}
+{retrieved_context[:5000]}
+
+Review State:
+{ledger_context[:1000] if ledger_context else "없음"}
 
 Instructions:
 1. Synthesize the research results to answer the user's question.
