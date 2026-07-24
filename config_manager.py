@@ -98,6 +98,12 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "fts_search_enabled": True,
         "path": "%LOCALAPPDATA%/OSL AI Assistant/metadata_index.sqlite3",
     },
+    "atomization": {
+        "enabled": False,
+        "llm_enabled": False,
+        "candidate_k": 20,
+        "parent_k": 5,
+    },
     "vector": {
         "backend": "turbovec",
         "index_dir": "%LOCALAPPDATA%/OSL AI Assistant/turbovec_index",
@@ -153,7 +159,7 @@ def _merge_defaults(user_config: Dict[str, Any], defaults: Dict[str, Any]) -> Di
 
 
 def _enforce_internal_defaults(config: Dict[str, Any]) -> tuple[Dict[str, Any], bool]:
-    """Apply v1.4.4 internal defaults that are no longer user-toggleable."""
+    """Apply required defaults and migrate retired local model settings."""
     changed = False
     metadata = config.setdefault("metadata_index", {})
     if metadata.get("enabled") is not True:
@@ -172,6 +178,28 @@ def _enforce_internal_defaults(config: Dict[str, Any]) -> tuple[Dict[str, Any], 
     for key, value in ocr_defaults.items():
         if key not in ocr_config:
             ocr_config[key] = value
+            changed = True
+
+    local = config.setdefault("ai_provider", {}).setdefault("local", {})
+    retired_model = "cookieshake/a.x-4.0-light-imatrix:q4_k_m"
+    retired_model_prefix = "cookieshake/a.x-4.0-light-imatrix"
+    qwen_model = DEFAULT_CONFIG["ai_provider"]["local"]["adviser_model"]
+    for key in ("adviser_model", "fallback_agent_model"):
+        if local.get(key) == retired_model:
+            local[key] = qwen_model
+            changed = True
+    available_models = local.get("available_models")
+    if isinstance(available_models, list):
+        filtered_models = [model for model in available_models if not str(model).startswith(retired_model_prefix)]
+        if filtered_models != available_models:
+            local["available_models"] = filtered_models
+            changed = True
+    capabilities = local.get("model_capabilities")
+    if isinstance(capabilities, dict):
+        retired_keys = [key for key in capabilities if str(key).startswith(retired_model_prefix)]
+        if retired_keys:
+            for key in retired_keys:
+                del capabilities[key]
             changed = True
     return config, changed
 
